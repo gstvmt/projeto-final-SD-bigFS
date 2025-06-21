@@ -15,6 +15,67 @@ import time
 class ServerMaster():
 
     def __init__(self, kafka_broker='localhost:9092'):
+        """
+            Inicializa a instância do servidor mestre responsável por gerenciar os workers e os usuários do sistema.
+
+            -------------------------------------------------------
+            Principais funções executadas durante a inicialização:
+
+            1. Cria as estruturas de dados que armazenam informações sobre:
+                - Workers ativos e disponíveis.
+                - Mapeamento de arquivos entre workers.
+                - Usuários cadastrados no sistema.
+            
+            2. Configura a conexão com o broker Kafka para receber mensagens de heartbeat enviadas pelos workers.
+
+            3. Inicia uma thread separada que ficará responsável por monitorar periodicamente o status dos workers,
+            processando os heartbeats recebidos via Kafka.
+
+            -------------------------------------------------------
+            Parâmetros:
+            kafka_broker : str
+                Endereço do broker Kafka utilizado para comunicação com os workers.
+                Formato típico: `"host:port"`, por exemplo: `"localhost:9092"`.
+
+            -------------------------------------------------------
+            Estruturas e atributos criados:
+            - `self.workers`:  
+                Dicionário para armazenar proxies ou informações dos workers conectados.  
+                Formato:  
+                    {worker_id: <Proxy Pyro5 ou objeto worker>}
+
+            - `self.hash_ring`:  
+                Estrutura (inicialmente `None`) que pode ser usada futuramente para balanceamento de carga com **Consistent Hashing**.
+
+            - `self.files` e `self.files_map`:  
+                Estruturas para mapear os arquivos gerenciados no sistema:
+                    - `self.files`: Mapeia o caminho original do arquivo para seu hash.
+                    - `self.files_map`: Mapeia o hash do arquivo para o worker onde ele está armazenado.
+
+            - `self.users`:  
+                Dicionário simples de usuários, inicialmente com um usuário padrão:
+                    {'admin': 'admin'}
+
+            - `self.kafka_consumer`:  
+                    Instância de um consumidor Kafka configurado para escutar o tópico **`worker_heartbeats`**,  
+                    deserializando mensagens no formato JSON.
+
+            - `self.last_heartbeats`:  
+                Dicionário que armazena informações de monitoramento de cada worker, como último timestamp de heartbeat e uso de recursos.
+
+            - `self.monitor_thread`:  
+                Thread em segundo plano que executa o método `_monitor_workers`, responsável por monitorar os heartbeats dos workers.
+
+            -------------------------------------------------------
+            Métodos chamados:
+            - `self.load()`:  
+                Método responsável por carregar os usuários previamente registrados no sistema.
+
+            -------------------------------------------------------
+            Retorno:
+            Nenhum (construtor da classe).
+
+        """
         # dicionario de workers
         self.workers = {}
 
@@ -51,40 +112,82 @@ class ServerMaster():
         self.monitor_thread.start()
 
     def _monitor_workers(self):
-        """Consome mensagens de heartbeat e monitora status dos workers"""
+        """
+            Consome mensagens de heartbeat vindas do Kafka e monitora o status dos workers.
+
+            -------------------------------------------------------
+            Funcionamento geral:
+                Esta função roda em loop contínuo, escutando o tópico Kafka configurado para `self.kafka_consumer`.
+                Cada mensagem recebida contém informações de um worker, incluindo seu `worker_id`, uso de memória,
+                espaço livre em disco e taxa de I/O.
+
+            -------------------------------------------------------
+            Principais tarefas da função:
+
+                1. Atualizar o dicionário `self.last_heartbeats`, armazenando o timestamp atual e os dados de recursos
+                do worker que acabou de enviar o heartbeat.
+                
+                2. Verificar a cada ciclo se existem workers inativos (ou seja, que não enviam heartbeat há mais de 5 segundos).
+                Caso algum worker seja considerado inativo, seu status é alterado para `'off'` no dicionário `self.last_heartbeats`.
+                
+                3. Exibir logs no console com o status dos workers ativos e inativos.
+
+            -------------------------------------------------------
+            Variáveis e estruturas importantes:
+
+            - `self.kafka_consumer`: Consumidor Kafka configurado para ler mensagens de heartbeat dos workers.
+            - `self.last_heartbeats`: Dicionário que mantém o último status conhecido de cada worker.
+                Formato:
+                    self.last_heartbeats = {
+                        'worker_id_1': {
+                            'timestamp': <última vez que enviou heartbeat>,
+                            'status': 'on' ou 'off',
+                            'memory_used_percent': <uso de memória em %>,
+                            'disk_free_gb': <espaço livre em GB>,
+                            'disk_read_rate_bps': <taxa de leitura em bytes por segundo>,
+                            'disk_write_rate_bps': <taxa de escrita em bytes por segundo>
+                        },
+                        ...
+                }
+                ```
+
+            -------------------------------------------------------
+            Parâmetros:
+                Nenhum (além de `self`).
+
+            -------------------------------------------------------
+            Retorno:
+                Nenhum (função de execução contínua / loop infinito).
+
+        """
         for message in self.kafka_consumer:
             try:
                 data = message.value
                 worker_id = data['worker_id']
                 
-                # Atualiza último heartbeat recebido
-                self.last_heartbeats[worker_id] = {
-                    'timestamp': data['timestamp'],
-                    'status': data['status'],
-                    'load': data['load']
-                }
-                
-                # Verifica workers inativos (mais de 15 segundos sem heartbeat)
                 current_time = time.time()
+                # Atualiza último heartbeat recebido
+
+                self.last_heartbeats[worker_id] = {
+                    'timestamp': current_time,
+                    'status': 'on',
+                    'memory_used_percent': data['memory_used_percent'],
+                    'disk_free_gb': data['disk_free_gb'],
+                    'disk_read_rate_bps': data['disk_read_rate_bps'],
+                    'disk_write_rate_bps': data['disk_write_rate_bps']
+                }
+
+                # Verifica workers inativos (mais de 5 segundos sem heartbeat)
                 inactive_workers = [
                     wid for wid, info in self.last_heartbeats.items()
-                    if current_time - info['timestamp'] > 15
+                    if (current_time - info['timestamp'] > 5 and info['status'] == 'on')
                 ]
-                
+
                 # Remove workers inativos
                 for wid in inactive_workers:
-                    if wid in self.workers:
-                        print(f"Worker {wid} marcado como inativo")
-                        del self.workers[wid]
-                        self.hash_ring = HashRing(list(self.workers.keys()))
-                        
-                        # Remove arquivos mapeados para este worker
-                        hashes_to_remove = [
-                            h for h, w in self.files_map.items() if w == wid
-                        ]
-                        for h in hashes_to_remove:
-                            del self.files_map[h]
-                
+                    print(f"Worker {wid} marcado como off")
+                    self.last_heartbeats[wid]['status'] = 'off'
+
             except Exception as e:
                 print(f"Erro ao processar heartbeat: {e}")
 

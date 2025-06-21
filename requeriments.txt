@@ -1,2 +1,3 @@
 confluent-kafka
 kafka
+pip install --upgrade kafka-python
