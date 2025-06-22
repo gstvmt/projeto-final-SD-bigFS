@@ -8,6 +8,7 @@ from pathlib import Path
 import threading
 import Pyro5.api
 import hashlib
+import base64
 import json
 import time
 
@@ -78,6 +79,10 @@ class ServerMaster():
         """
         # dicionario de workers
         self.workers = {}
+
+        self.block_size = 16 * 1024 * 1024  # 16MB por bloco
+        self.num_replic = 2                 # Número de réplicas por bloco
+        self.rr_counter = 0  # Contador para round-robin
 
         # hash ring para o balanceamento de carga entre os workers
         self.hash_ring = None
@@ -271,6 +276,61 @@ class ServerMaster():
         except Exception as e:
             print(f"Erro ao carregar o arquivo de usuarios: {e}")
 
+    def get_round_robin_worker(self):
+        """
+            Seleciona um worker disponível usando o algoritmo round-robin.
+
+            -------------------------------------------------------
+            Funcionamento geral:
+                Esta função implementa um algoritmo round-robin para selecionar workers
+                de forma balanceada, garantindo que apenas workers ativos (status 'on')
+                sejam retornados.
+
+            -------------------------------------------------------
+            Principais tarefas da função:
+
+                1. Verifica se existem workers registrados.
+                
+                2. Percorre a lista de workers em ordem round-robin.
+                
+                3. Verifica o status do worker através do last_heartbeats.
+                
+                4. Retorna o primeiro worker ativo encontrado.
+
+            -------------------------------------------------------
+            Variáveis e estruturas importantes:
+
+            - `self.workers`: Dicionário contendo os workers disponíveis.
+            - `self.rr_counter`: Contador interno para o algoritmo round-robin.
+            - `self.last_heartbeats`: Dicionário com status dos workers.
+                Formato:
+                    {
+                        'worker1': {'status': 'on'/'off', ...},
+                        ...
+                    }
+
+            -------------------------------------------------------
+            Parâmetros:
+                Nenhum (usa apenas atributos da classe)
+
+            -------------------------------------------------------
+            Retorno:
+                (str) Nome do worker selecionado
+
+        """
+        if not self.workers:
+            raise Exception("No workers available")
+        
+        # Pega o próximo worker na sequência
+        workers = list(self.workers.keys())
+        while True:
+            worker_name = workers[self.rr_counter % len(workers)]
+            self.rr_counter = (self.rr_counter + 1) % len(workers)
+            if self.last_heartbeats.get(worker_name, {}).get('status') == 'on':
+                break
+    
+        return worker_name
+
     def ls(self, path, user):
         '''
         Lista os arquivos e diretorios de um caminho.
@@ -302,71 +362,292 @@ class ServerMaster():
         
     def cp_from(self, path, user):
         '''
-        Copia um arquivo de um cliente para um worker.
-        :param path: caminho do arquivo de destino
+            Inicia o processo de cópia de um arquivo do cliente para o sistema distribuído.
+
+            -------------------------------------------------------
+            Funcionamento geral:
+                Esta função prepara a estrutura para receber um novo arquivo ou continuar o upload de um arquivo existente.
+                Cria as entradas necessárias nos dicionários de controle e retorna um endpoint para upload em blocos.
+
+            -------------------------------------------------------
+            Principais tarefas da função:
+
+                1. Normaliza o caminho do arquivo, adicionando o prefixo /NFS/{user} caso o path não seja absoluto.
+                
+                2. Verifica se o arquivo já existe no sistema. Caso não exista, inicializa sua estrutura de dados.
+                
+                3. Retorna um dicionário com informações para o upload em blocos, incluindo:
+                    - Caminho completo do arquivo
+                    - Próximo bloco a ser recebido
+                    - Tamanho atual do arquivo
+
+            -------------------------------------------------------
+            Variáveis e estruturas:
+
+            - `self.files`: Dicionário que armazena metadados sobre os arquivos.
+                Formato:
+                    self.files = {
+                        '<caminho_arquivo>': {
+                            'blocks': [<hash_bloco1>, <hash_bloco2>, ...],
+                            'size': <tamanho_total_arquivo>
+                        },
+                        ...
+                    }
+            
+            - `path`: Caminho do arquivo fornecido pelo usuário.
+            - `user`: Nome do usuário solicitante (para namespace isolado no NFS).
+
+            -------------------------------------------------------
+            Parâmetros:
+                :param path: (str) Caminho relativo ou absoluto do arquivo no sistema de arquivos.
+                :param user: (str) Identificação do usuário dono do arquivo.
+
+            -------------------------------------------------------
+            Retorno:
+                (dict) Endpoint para upload contendo:
+                    {
+                        'file_path': (str) caminho completo do arquivo,
+                        'next_block': (int) próximo bloco a ser recebido (inicia em 0),
+                        'current_size': (int) tamanho atual do arquivo (inicia em 0)
+                    }
+
         '''
+
         try:
-            # verifica se o caminho esta no formato correto
             path = Path(path)
             if not path.is_absolute():
                 path = Path(f"/NFS/{user}") / path
 
             p_string = str(path)
 
-            # verifica se o arquivo nao existe
-            if p_string not in self.files.keys():
-                hash = hashlib.sha256(p_string.encode()).hexdigest()
-                self.files[p_string] = hash
-                self.files_map[hash] = self.hash_ring.get_node(hash)
-                self.save_file()
-
-            path_hash = self.files[p_string]
-            worker_name = self.files_map[path_hash]
-            worker = self.workers[worker_name]
-            worker._pyroClaimOwnership()
-            index = worker.open_file(path_hash, "wb")
-            endpoint = (index, worker_name) # indice do arquivo aberto no worker e o nome do worker
-            return endpoint
+            # Se o arquivo já existe, retorna erro
+            if p_string in self.files.keys():
+                if self.files[p_string]['size'] > 0:
+                    raise Exception(f"Arquivo {p_string} já existe. Use outro nome ou delete o arquivo existente.")
+            
+            # Inicializa a estrutura do arquivo
+            self.files[p_string] = {
+                'blocks': [],
+                'size': 0
+            }
+            self.save_file()
+                
+            # Retorna um endpoint especial para upload em blocos
+            return {
+                'file_path': p_string,
+                'next_block': 0,
+                'current_size': 0
+            }
 
         except Exception as e:
             raise e
         
-    def receive_chunk(self, chunk, endpoint):
+    def receive_chunk(self, chunk_data, endpoint_info):
         '''
-        Recebe um chunk de um arquivo.
-        :param chunk: chunk a ser recebido
-        :param index: indice do arquivo
+            Processa um chunk de dados recebido e o armazena nos nós.
+
+            -------------------------------------------------------
+            Funcionamento geral:
+                Esta função recebe um pedaço (chunk) de um arquivo e o armazena nos workers conforme
+                a política de replicação definida. Gerencia todo o processo de escrita distribuída.
+
+            -------------------------------------------------------
+            Principais tarefas da função:
+
+                1. Decodifica o chunk de dados (caso esteja em base64).
+                
+                2. Para novos blocos (current_size == 0):
+                    a. Calcula o hash de identificação do bloco
+                    b. Seleciona os workers para replicação usando round-robin
+                    c. Armazena o mapeamento bloco→workers
+                
+                3. Escreve o chunk em todos os workers de replicação:
+                    a. Abre o arquivo no worker (se for primeiro chunk do bloco)
+                    b. Escreve o chunk
+                    c. Fecha o arquivo (quando bloco é completado)
+                
+                4. Atualiza os metadados do arquivo (tamanho total, blocos, etc).
+
+            -------------------------------------------------------
+            Variáveis e estruturas importantes:
+
+            - `self.files_map`: Dicionário que mapeia blocos para workers de replicação.
+                Formato:
+                    self.files_map = {
+                        '<hash_do_bloco>': ['worker1', 'worker2', ...],
+                        ...
+                    }
+            
+            - `self.block_size`: Tamanho máximo de cada bloco (em bytes).
+            - `self.num_replic`: Número de réplicas para cada bloco.
+            - `self.workers`: Dicionário de workers disponíveis.
+            - `endpoint_info`: Estado atual do upload contendo:
+                {
+                    'file_path': (str) caminho do arquivo,
+                    'next_block': (int) próximo bloco esperado,
+                    'current_size': (int) bytes recebidos no bloco atual,
+                    '<worker_name>': (int) handle do arquivo aberto no worker (opcional)
+                }
+
+            -------------------------------------------------------
+            Parâmetros:
+                :param chunk_data: (bytes/dict) Dados do chunk, pode ser raw bytes ou dict com {'data': b64, 'encoding': 'base64'}
+                :param endpoint_info: (dict) Estado atual do upload (retornado por cp_from ou chamada anterior)
+
+            -------------------------------------------------------
+            Retorno:
+                (tuple) Contendo:
+                    - eof: (bool) Indica se foi o último chunk do arquivo
+                    - endpoint_info: (dict) Estado atualizado do upload
+
         '''
         try:
-            worker = self.workers[endpoint[1]]
-            eof = worker.write_chunk(chunk, endpoint[0])
-            return eof
+            if isinstance(chunk_data, dict) and 'data' in chunk_data and chunk_data.get('encoding') == 'base64':
+                chunk = base64.b64decode(chunk_data['data'])
+            else:
+                chunk = chunk_data
+
+            p_string = endpoint_info['file_path']
+            block_num = endpoint_info['next_block']
+            current_size = endpoint_info['current_size']
+            eof = False
+
+            
+            # Gera o hash do bloco atual (mesmo que não seja novo)
+            block_identifier = f"{p_string}_block{block_num}"
+            block_hash = hashlib.sha256(block_identifier.encode()).hexdigest()
+
+            # Se for o primeiro chunk de um novo bloco
+            if current_size == 0:
+                temp_hash = block_hash
+                replicas = []
+
+                for _ in range(self.num_replic):
+                    node = self.get_round_robin_worker() #self.hash_ring.get_node(temp_hash)
+                    print(f"Selecionando nó: {node}")
+                    replicas.append(node)
+                    # Roda o hash novamente para selecionar diferentes nós
+                    temp_hash = hashlib.sha256(temp_hash.encode()).hexdigest()
+
+                # Armazena o mapeamento apenas se for um novo bloco
+                if block_hash not in self.files_map:
+                    self.files_map[block_hash] = replicas
+                    self.files[p_string]['blocks'].append(block_hash)
+
+
+            # Envia o chunk para todos os workers de réplica
+            for worker_name in self.files_map[block_hash]:
+                worker = self.workers[worker_name]
+                worker._pyroClaimOwnership()
+                
+                # Se for o primeiro chunk, abre o arquivo
+                if current_size == 0:
+                    index = worker.open_file(block_hash, "wb")
+                    endpoint_info[worker_name] = index
+
+                # Escreve o chunk
+                eof = worker.write_chunk(chunk, endpoint_info[worker_name])
+            
+            # Atualiza o endpoint_info
+            endpoint_info['current_size'] += len(chunk)
+
+            # Se completou o bloco
+            if endpoint_info['current_size'] >= self.block_size:
+                print("Bloco completo, atualizando informações...")
+                endpoint_info['next_block'] += 1
+                endpoint_info['current_size'] = 0
+                # Fecha os arquivos nos workers
+                print(f"self.files_map[block_hash]: {self.files_map[block_hash]}")
+                for worker_name in self.files_map[block_hash]:
+                    worker = self.workers[worker_name]
+                    worker.close_block(endpoint_info[worker_name])
+                    del endpoint_info[worker_name]
+
+
+            # Atualiza o tamanho total do arquivo
+            self.files[p_string]['size'] += len(chunk)
+            self.save_file()
+            
+            return eof, endpoint_info
+
         except Exception as e:
             raise e
         
     def cp_to(self, path, user):
         '''
-        Copia um arquivo do worker para o cliente
-        :param path: caminho do arquivo de origem
+            Prepara o download para o cliente.
+
+            -------------------------------------------------------
+            Funcionamento geral:
+                Esta função verifica a existência do arquivo solicitado e cria uma estrutura
+                de endpoint para gerenciar o download em blocos do arquivo distribuído.
+
+            -------------------------------------------------------
+            Principais tarefas da função:
+
+                1. Normaliza o caminho do arquivo, adicionando o prefixo /NFS/{user} caso o path não seja absoluto.
+                
+                2. Verifica se o arquivo existe no sistema através do dicionário self.files.
+                
+                3. Cria e retorna uma estrutura de endpoint contendo todas as informações necessárias
+                para realizar o download em blocos do arquivo.
+
+            -------------------------------------------------------
+            Variáveis e estruturas importantes:
+
+            - `self.files`: Dicionário que armazena metadados sobre os arquivos.
+                Formato:
+                    self.files = {
+                        '<caminho_arquivo>': {
+                            'blocks': [<hash_bloco1>, <hash_bloco2>, ...],
+                            'size': <tamanho_total_arquivo>
+                        },
+                        ...
+                    }
+            
+            - `path`: Caminho do arquivo fornecido pelo usuário.
+            - `user`: Nome do usuário solicitante (para namespace isolado no NFS).
+
+            -------------------------------------------------------
+            Parâmetros:
+                :param path: (str) Caminho relativo ou absoluto do arquivo no sistema de arquivos.
+                :param user: (str) Identificação do usuário dono do arquivo.
+
+            -------------------------------------------------------
+            Retorno:
+                (dict) Endpoint para download contendo:
+                    {
+                        'file_path': (str) caminho completo do arquivo,
+                        'current_block': (int) índice do bloco atual (inicia em 0),
+                        'block_offset': (int) offset dentro do bloco atual (inicia em 0),
+                        'total_size': (int) tamanho total do arquivo em bytes,
+                        'blocks': (list) lista de hashes dos blocos do arquivo,
+                        'workers': (dict) vazio inicialmente, armazenará handles de workers
+                    }
+
         '''
         try:
-            # verifica se o caminho esta no formato correto
+            # Normaliza o caminho
             path = Path(path)
             if not path.is_absolute():
                 path = Path(f"/NFS/{user}") / path
 
             p_string = str(path)
 
-            # verifica se o arquivo existe
-            if p_string not in self.files.keys():
-                raise Exception("Arquivo nao encontrado")
+            # Verifica se o arquivo existe
+            if p_string not in self.files:
+                raise Exception("Arquivo não encontrado")
 
-            hash = self.files[p_string]
-            worker_name = self.files_map[hash]
-            worker = self.workers[worker_name]
-            worker._pyroClaimOwnership()
-            index = worker.open_file(hash, "rb")
-            endpoint = (index, worker_name) # indice do arquivo aberto no worker e o nome do worker
+            # Cria estrutura de endpoint para download em blocos
+            endpoint = {
+                'file_path': p_string,
+                'current_block': 0,
+                'block_offset': 0,
+                'total_size': self.files[p_string]['size'],
+                'blocks': self.files[p_string]['blocks'],
+                'workers': {}  # Armazenará os workers ativos para cada bloco
+            }
+
             return endpoint
 
         except Exception as e:
@@ -374,14 +655,122 @@ class ServerMaster():
         
     def send_chunk(self, endpoint):
         '''
-        Envia um chunk de um arquivo.
-        :param index: indice do arquivo
+            Envia chunks de um nó para o cliente.
+
+            -------------------------------------------------------
+            Funcionamento geral:
+                Esta função implementa um gerador que percorre todos os blocos do arquivo,
+                lendo cada bloco de um worker disponível e enviando os chunks sequencialmente.
+
+            -------------------------------------------------------
+            Principais tarefas da função:
+
+                1. Para cada bloco do arquivo (em ordem):
+                    a. Encontra um worker disponível que possua o bloco
+                    b. Abre o arquivo no worker em modo leitura
+                    c. Lê e envia os chunks sequencialmente
+                    d. Fecha o arquivo no worker após ler todo o bloco
+                
+                2. Mantém o controle do progresso do download através do endpoint.
+
+            -------------------------------------------------------
+            Variáveis e estruturas importantes:
+
+            - `self.files_map`: Dicionário que mapeia blocos para workers de replicação.
+                Formato:
+                    self.files_map = {
+                        '<hash_do_bloco>': ['worker1', 'worker2', ...],
+                        ...
+                    }
+            
+            - `self.block_size`: Tamanho máximo de cada bloco (em bytes).
+            - `self.workers`: Dicionário de workers disponíveis.
+            - `endpoint`: Estado atual do download contendo:
+                {
+                    'file_path': (str) caminho do arquivo,
+                    'current_block': (int) índice do bloco atual,
+                    'block_offset': (int) offset dentro do bloco atual,
+                    'total_size': (int) tamanho total do arquivo,
+                    'blocks': (list) lista de hashes dos blocos,
+                    'workers': (dict) mapeamento bloco→(worker_name, handle)
+                }
+
+            -------------------------------------------------------
+            Parâmetros:
+                :param endpoint: (dict) Estado do download (retornado por cp_to)
+
+            -------------------------------------------------------
+            Retorno:
+                (generator) Que produz:
+                    (dict) Chunks de dados no formato:
+                        {
+                            'data': (str) dados codificados em base64,
+                            'encoding': 'base64'
+                        }
+
         '''
         try:
-            worker = self.workers[endpoint[1]]
-            for chunk in worker.read_chunks(endpoint[0]):
-                yield chunk
+            # Percorre todos os blocos do arquivo
+            while endpoint['current_block'] < len(endpoint['blocks']):
+                block_hash = endpoint['blocks'][endpoint['current_block']]
+                
+                # Se não temos um worker aberto para este bloco
+                if block_hash not in endpoint['workers']:
+                    # Pega a lista de workers que possuem este bloco
+                    available_workers = self.files_map.get(block_hash, [])
+                    
+                    if not available_workers:
+                        raise Exception(f"Nenhum worker disponível para o bloco {block_hash}")
+                    
+                    # Tenta encontrar um worker disponível
+                    for worker_name in available_workers:
+                        try:
+                            worker = self.workers[worker_name]
+                            worker._pyroClaimOwnership()
+                            index = worker.open_file(block_hash, "rb")
+                            endpoint['workers'][block_hash] = (worker_name, index)
+                            break
+                        except:
+                            continue
+                    else:
+                        raise Exception(f"Não foi possível acessar o bloco {block_hash} em nenhum worker")
+                
+                worker_name, index = endpoint['workers'][block_hash]
+                worker = self.workers[worker_name]
+                
+                # Usa o read_chunks existente do worker
+                for chunk in worker.read_chunks(index):
+                    yield chunk
+                    
+                    # Atualiza o progresso (opcional)
+                    endpoint['block_offset'] += len(base64.b64decode(chunk['data']))
+                    
+                    # Verifica se terminou o bloco (baseado no tamanho esperado)
+                    if endpoint['block_offset'] >= self.block_size:
+                        endpoint['block_offset'] = 0
+                        break
+                
+                # Move para o próximo bloco
+                endpoint['current_block'] += 1
+                
+            # Limpeza final
+            for block_hash, (worker_name, index) in endpoint['workers'].items():
+                try:
+                    # O worker já fecha o arquivo automaticamente no read_chunks
+                    # quando termina de ler, mas fazemos uma verificação adicional
+                    if index in self.workers[worker_name].opened_files:
+                        self.workers[worker_name].close_block(index)
+                except:
+                    pass
+
         except Exception as e:
+            # Limpeza em caso de erro
+            for block_hash, (worker_name, index) in endpoint['workers'].items():
+                try:
+                    if index in self.workers[worker_name].opened_files:
+                        self.workers[worker_name].close_block(index)
+                except:
+                    pass
             raise e
         
     def rm(self, paths, user):
