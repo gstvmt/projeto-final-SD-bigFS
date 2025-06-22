@@ -243,6 +243,54 @@ class Worker:
         except Exception as e:
             raise e
         
+    def close_block(self, index):
+        """
+            Fecha um bloco aberto e o mantém no armazenamento.
+
+            -------------------------------------------------------
+            Funcionamento geral:
+                Esta função fecha um bloco que estava aberto para leitura/escrita,
+                liberando os recursos associados enquanto mantém o bloco armazenado.
+
+            -------------------------------------------------------
+            Principais tarefas da função:
+
+                1. Obtém um lock para garantir operação thread-safe.
+                
+                2. Localiza o arquivo correspondente ao índice fornecido.
+                
+                3. Fecha o arquivo e remove sua referência da lista de arquivos abertos.
+
+            -------------------------------------------------------
+            Variáveis e estruturas importantes:
+
+            - `self.lock`: Objeto de lock para sincronização de threads.
+            - `self.opened_files`: Dicionário que mapeia índices para objetos de arquivo abertos.
+                Formato:
+                    self.opened_files = {
+                        <index>: <file_object>,
+                        ...
+                    }
+
+            -------------------------------------------------------
+            Parâmetros:
+                :param index: (int) Índice do arquivo a ser fechado (retornado por open_file).
+
+            -------------------------------------------------------
+            Retorno:
+                None
+
+        """
+        try:
+            with self.lock:
+                file = self.opened_files[index]
+                file.close()
+                self.opened_files.pop(index)
+                return
+            
+        except Exception as e:
+            raise e
+        
     def read_chunks(self, index):
         """
         Read data chunks from the opened file.
