@@ -103,7 +103,7 @@ class Client():
                 with open(local_path, "rb") as f:
                     while True:
                         chunk = f.read(1024*64) # 64kB
-                        eof = self.server.receive_chunk(chunk, endpoint)
+                        eof, endpoint = self.server.receive_chunk(chunk, endpoint)
                         if eof:
                             break
             else: # local_path = dst
