@@ -48,17 +48,41 @@ class MetadataRepository:
         return self._remote_service.remove_fs_entry(path)
 
     def add_entry(self, path, entry_data):
-        """Adiciona uma nova entrada no sistema e no cache."""
-        # Chama o serviço remoto para adicionar
+        """
+        Garante que todos os diretórios pais existam antes de adicionar a entrada final.
+        Exemplo: Para '1/teste/teste2/arquivo.txt', cria os diretórios '1', '1/teste', '1/teste/teste2'
+        antes de adicionar o 'arquivo.txt'.
+        """
+        # Divide o caminho por partes
+        parts = path.strip('/').split('/')
+        current_path = ""
         self._remote_service._pyroClaimOwnership()
-        success = self._remote_service.add_fs_entry(path, entry_data)
         
-        # Se foi bem-sucedido, atualiza o cache local
-        if success:
-            self._cache[path] = entry_data
-            print(f"[MetadataRepository] Cache populado para nova entrada: {path}")
-        
-        return success
+        for i, part in enumerate(parts):
+            current_path += "/" + part
+
+            # Se for a última parte, é o arquivo final
+            is_last = (i == len(parts) - 1)
+
+            if not is_last:
+                # Criar diretório se ainda não existe
+                if current_path not in self._cache:
+                    print(f"[MetadataRepository] Criando diretório: {current_path}")
+                    dir_entry = {"type": "dir", "children": []}
+                    success = self._remote_service.add_fs_entry(current_path, dir_entry)
+                    if not success:
+                        print(f"[MetadataRepository] Falha ao criar diretório: {current_path}")
+                        return False
+            else:
+                # Adiciona o arquivo ou entrada final
+                success = self._remote_service.add_fs_entry(current_path, entry_data)
+                if not success:
+                    print(f"[MetadataRepository] Falha ao adicionar entrada final: {current_path}")
+                    return False
+
+        print(f"[MetadataRepository] Entrada adicionada com sucesso: {path}")
+        self._cache[path] = entry_data
+        return True
     
     def invalidate_cache(self, path: str):
         """
