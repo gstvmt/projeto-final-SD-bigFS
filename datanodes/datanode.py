@@ -6,12 +6,13 @@ import socket
 import time
 import threading
 import json
+import psutil
 import base64
 from kafka import KafkaProducer
 
 # --- Configuração do DataNode ---
 
-HEARTBEAT_INTERVAL_SECONDS = 15
+HEARTBEAT_INTERVAL_SECONDS = 1
 KAFKA_TOPIC = "datanode_heartbeats"
 KAFKA_SERVERS = ['localhost:9092'] 
 
@@ -22,6 +23,7 @@ class DataNodeService:
     def __init__(self, node_id, storage_path):
         self._node_id = node_id
         self._storage_path = storage_path
+        self.opened_files = {}
         
         # Garante que o diretório de armazenamento exista
         if not os.path.exists(self._storage_path):
@@ -35,22 +37,90 @@ class DataNodeService:
         Gera um caminho de arquivo seguro para um block_id, prevenindo ataques
         de path traversal.
         """
-        # Garante que o block_id não contenha caracteres como '..' ou '/'
-        safe_filename = os.path.basename(block_id)
-        return os.path.join(self._storage_path, safe_filename)
+        # Junta o storage_path com o block_id (permitindo subdiretórios dentro do block_id)
+        full_path = os.path.join(self._storage_path, block_id)
+        
+        # Garante que o caminho gerado esteja dentro da raiz _storage_path
+        full_path = os.path.abspath(full_path)
+        if not os.path.exists(full_path):
+            print(f"Criando arquivos full_path: {full_path}")
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+
+        return full_path
 
     def write_block(self, block_id, data):
         data = base64.b64decode(data.get("data")) if isinstance(data, dict) else data
-        filepath = self._get_block_filepath(block_id)
-        print(f"[{self._node_id}] Escrevendo bloco '{block_id}' em disco ({len(data)} bytes).")
-        try:
-            with open(filepath, "wb") as f: # 'wb' = write binary
-                f.write(data)
-            return True
-        except IOError as e:
-            print(f"ERRO ao escrever bloco '{block_id}' em disco: {e}")
-            return False
 
+        filepath = self._get_block_filepath(block_id)
+
+        try:
+            if not filepath in self.opened_files:
+                file = open(filepath, "wb")
+                self.opened_files[filepath] = file
+
+            file = self.opened_files[filepath]
+            if not data:
+                file.close()
+                self.opened_files.pop(filepath)
+                return True
+            
+            file.write(data)
+            return True
+        except Exception as e:
+            raise e
+
+
+    def close_block(self, block_id):
+        """
+            Fecha um bloco aberto e o mantém no armazenamento.
+
+            -------------------------------------------------------
+            Funcionamento geral:
+                Esta função fecha um bloco que estava aberto para leitura/escrita,
+                liberando os recursos associados enquanto mantém o bloco armazenado.
+
+            -------------------------------------------------------
+            Principais tarefas da função:
+
+                1. Obtém um lock para garantir operação thread-safe.
+                
+                2. Localiza o arquivo correspondente ao índice fornecido.
+                
+                3. Fecha o arquivo e remove sua referência da lista de arquivos abertos.
+
+            -------------------------------------------------------
+            Variáveis e estruturas importantes:
+
+            - `self.lock`: Objeto de lock para sincronização de threads.
+            - `self.opened_files`: Dicionário que mapeia índices para objetos de arquivo abertos.
+                Formato:
+                    self.opened_files = {
+                        <index>: <file_object>,
+                        ...
+                    }
+
+            -------------------------------------------------------
+            Parâmetros:
+                :param index: (int) Índice do arquivo a ser fechado (retornado por open_file).
+
+            -------------------------------------------------------
+            Retorno:
+                None
+
+        """
+        try:
+            filepath = self._get_block_filepath(block_id)
+
+            file = self.opened_files[filepath]
+            file.close()
+            self.opened_files.pop(filepath)
+
+            print(f"[{self._node_id}] Bloco '{block_id}' fechado e mantido no armazenamento.")
+            return
+            
+        except Exception as e:
+            raise e
+        
     def read_block(self, block_id):
         filepath = self._get_block_filepath(block_id)
         print(f"[{self._node_id}] Lendo bloco '{block_id}' do disco.")
@@ -75,7 +145,7 @@ class DataNodeService:
             return False
         
 
-def heartbeat_producer(datanode_uri):
+def heartbeat_producer(datanode_uri, node_id):
 
     """Envia heartbeats para o tópico Kafka em uma thread de background."""
 
@@ -87,9 +157,37 @@ def heartbeat_producer(datanode_uri):
     payload = {"address": str(datanode_uri)}
     print(f"Thread de Heartbeat iniciada para {datanode_uri}.")
 
+    last_io_counters = psutil.disk_io_counters()
+    last_time = time.time()
     while True:
+        
+        # --- Calcular taxa de IO ---
+        current_io_counters = psutil.disk_io_counters()
+        current_time = time.time()
+        elapsed = current_time - last_time
 
-        payload["timestamp"] = time.time()
+        read_rate = (current_io_counters.read_bytes - last_io_counters.read_bytes) / elapsed  # bytes por segundo
+        write_rate = (current_io_counters.write_bytes - last_io_counters.write_bytes) / elapsed  # bytes por segundo
+
+        last_io_counters = current_io_counters
+        last_time = current_time
+
+        # --- Capturar memória ---
+        memory = psutil.virtual_memory()
+        memory_percent_used = memory.percent
+
+        # --- Capturar espaço em disco ---
+        disk = psutil.disk_usage('/')
+        disk_free_gb = disk.free / (1024 ** 3)
+
+        # --- Montar payload ---
+        payload["node_name"] = node_id
+        payload["memory_used_percent"] = memory_percent_used
+        payload["disk_free_gb"] = round(disk_free_gb, 2)
+        payload["disk_read_rate_bps"] = round(read_rate, 2)
+        payload["disk_write_rate_bps"] = round(write_rate, 2)
+        
+        
         producer.send(KAFKA_TOPIC, payload)
         time.sleep(HEARTBEAT_INTERVAL_SECONDS) 
 
@@ -102,7 +200,7 @@ if __name__ == "__main__":
     datanode_service = DataNodeService(node_id, storage_path=node_id)
     uri = daemon.register(datanode_service)
 
-    heartbeat_thread = threading.Thread(target=heartbeat_producer, args=(uri,))
+    heartbeat_thread = threading.Thread(target=heartbeat_producer, args=(uri, node_id))
     heartbeat_thread.daemon = True
     heartbeat_thread.start()
 
