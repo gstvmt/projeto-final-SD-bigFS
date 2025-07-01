@@ -1,5 +1,7 @@
 # services/copy_service.py
 
+import json
+import base64
 import Pyro5.api
 import threading
 import uuid
@@ -16,13 +18,14 @@ class UploadSession:
     Gerencia um único upload. Obtém a lista de DataNodes ativos do registro
     e se comunica diretamente com eles.
     """
-    def __init__(self, daemon, metadata_repo, datanode_registry, dfs_path, replica_count=3):
+    def __init__(self, daemon, metadata_repo, datanode_registry, dfs_path, replica_count=2):
         self._daemon = daemon
         self._metadata_repo = metadata_repo
         # CORREÇÃO: Recebe o registro de nós, não um cliente
         self._datanode_registry = datanode_registry
         self._dfs_path = dfs_path
         self._replica_count = replica_count
+        self.block_size = 16 * 1024 * 1024  # 16 MB
         
         self.session_id = str(uuid.uuid4())
         self.block_metadata = []
@@ -39,11 +42,21 @@ class UploadSession:
             print(f"ERRO ao escrever bloco {block_id} em {uri}: {e}")
             return False
 
-    def write_chunk(self, chunk_data):
+    def write_chunk(self, chunk_data, endpoint_info):
         if not self.is_active:
             raise RuntimeError("Sessão de upload não está mais ativa.")
 
-        print(f"[{self.session_id}] Recebeu chunk de {len(chunk_data)} bytes.")
+        if isinstance(chunk_data, dict) and 'data' in chunk_data and chunk_data.get('encoding') == 'base64':
+            chunk = base64.b64decode(chunk_data['data'])
+        else:
+            chunk = chunk_data
+
+        len_chunk = len(chunk)
+
+        p_string = endpoint_info['file_path']
+        block_num = endpoint_info['next_block']
+        current_size = endpoint_info['current_size']
+        nodes = endpoint_info.get('nodes', [])
         
         # CORREÇÃO: Lógica de seleção de nós, sem simulação.
         active_nodes = self._datanode_registry.get_available_nodes()
@@ -51,28 +64,74 @@ class UploadSession:
             raise IOError(f"Nós de dados ativos ({len(active_nodes)}) insuficientes para o fator de replicação ({self._replica_count}).")
         
         # Escolhe os nós para as réplicas de forma aleatória
-        nodes_for_replicas = random.sample(active_nodes, k=self._replica_count)
-        block_id = f"blk-{uuid.uuid4().hex}"
-        
+        nodes_for_replicas = []
+        if current_size == 0:
+            nodes_for_replicas = random.sample(active_nodes, k=self._replica_count)
+            endpoint_info["nodes"] = nodes_for_replicas
+        else:
+            # Continua o upload, reutilizando os nós já escolhidos
+            nodes_for_replicas = endpoint_info['nodes']
+        block_id = f"{p_string}_block{block_num}"
+
         # Submete as tarefas de escrita para o pool de threads
         futures = [
-            self.executor.submit(self._write_block_to_node, uri, block_id, chunk_data)
+            self.executor.submit(self._write_block_to_node, uri, block_id, chunk)
             for uri in nodes_for_replicas
         ]
-        
         results = [future.result() for future in futures]
         if not all(results):
             raise IOError("Falha ao escrever uma ou mais réplicas do bloco.")
+
+        endpoint_info['current_size'] += len_chunk
+        # Se completou o bloco
+        if endpoint_info['current_size'] >= self.block_size:
+            print("Bloco completo, atualizando informações...")
+            endpoint_info['next_block'] += 1
+            endpoint_info['current_size'] = 0
+            endpoint_info['nodes'] = []
             
-        # Armazena os metadados deste bloco para o commit final
-        block_info = {
-            "block_order": len(self.block_metadata),
-            "block_id": block_id,
-            "replicas": nodes_for_replicas
-        }
-        self.block_metadata.append(block_info)
+            # Fecha os arquivos nos workers
+            for uri in nodes:
+                with Pyro5.api.Proxy(uri) as proxy:
+                    proxy.close_block(block_id)
+
+            block_info = {
+                "block_order": len(self.block_metadata),
+                "block_id": block_id,
+                "replicas": nodes_for_replicas
+            }
+
+            self.block_metadata.append(block_info)
+
+        return endpoint_info
+
+    def close(self, endpoint_info):
+        """
+        Método chamado pelo cliente para fechar os blocos restantes.
+        """
+
+        p_string = endpoint_info['file_path']
+        block_num = endpoint_info['next_block']
+        current_size = endpoint_info['current_size']
+        nodes = endpoint_info.get('nodes', [])
+
+        if current_size > 0:
+            block_id = f"{p_string}_block{block_num}"
+
+            # Fecha os blocos restantes nos nós
+            for uri in nodes:
+                with Pyro5.api.Proxy(uri) as proxy:
+                    proxy.close_block(block_id)
+                
+            block_info = {
+                "block_order": len(self.block_metadata),
+                "block_id": block_id,
+                "replicas": nodes
+            }
+            self.block_metadata.append(block_info)
+
         
-        return {"status": "chunk_ok", "block_id": block_id}
+
 
     def commit(self, total_size):
         if not self.is_active:
@@ -175,14 +234,28 @@ class CopyService:
         self._datanode_registry = datanode_registry
         print("CopyService (Fábrica de Sessões) inicializado.")
 
-    def initiate_upload(self, dfs_path, file_info):
+    def initiate_upload(self, dfs_path, client_name):
+        # Juntando os nomes para criar um caminho único com join
+        dfs_path = "".join([client_name, dfs_path]) if client_name else dfs_path
+
         print(f"Iniciando uma nova sessão de upload para: {dfs_path}")
+
         # CORREÇÃO: Passa o datanode_registry para a sessão
         session = UploadSession(self._daemon, self._metadata_repo, self._datanode_registry, dfs_path)
         session_uri = self._daemon.register(session)
-        return {"session_uri": str(session_uri), "block_size_suggestion": 1024 * 1024}
+        endpoint = {
+                'file_path': dfs_path,
+                'next_block': 0,
+                'current_size': 0,
+                'nodes': []
+            }
+        
+        print(f"Sessão de upload iniciada. URI: {session_uri}, Endpoint: {endpoint}")
+        return {"session_uri": str(session_uri), "endpoint": endpoint}
     
-    def initiate_download(self, dfs_path):
+    def initiate_download(self, dfs_path, client_name):
+        dfs_path = "".join([client_name, dfs_path]) if client_name else dfs_path
+
         print(f"[CopyService] Iniciando sessão de download para: {dfs_path}")
         entry_info = self._metadata_repo.get_entry(dfs_path)
         if not entry_info or entry_info.get("type") != "file":
