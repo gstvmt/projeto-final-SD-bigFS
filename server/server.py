@@ -15,7 +15,7 @@ from services.remove_service import RemoveService
 from services.copy_service import CopyService 
 
 # --- Configuração ---
-HEARTBEAT_INTERVAL_SECONDS = 15
+HEARTBEAT_INTERVAL_SECONDS = 5
 KAFKA_HEARTBEAT_TOPIC = "server_heartbeats" # Heartbeat deste próprio servidor
 KAFKA_UPDATE_TOPIC = "datanode_cluster_updates" # Tópico para ouvir o Manager
 KAFKA_INVALIDATION_TOPIC = "metadata_invalidation_events"
