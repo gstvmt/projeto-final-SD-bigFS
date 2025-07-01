@@ -10,6 +10,7 @@ class FileSystemClient:
     distribuído por meio do API Gateway.
     """
     def __init__(self, nameserver):
+        self.client_id = f"Client-{int(time.time())}"
         print("Conectando ao API Gateway via Name Server...")
         # Localiza o API Gateway usando seu nome lógico no Name Server do Pyro
         gateway_uri = nameserver.lookup("APIGateway")
@@ -38,10 +39,9 @@ class FileSystemClient:
         file_info = {"size": file_size}
         
         # 1. Inicia a sessão de upload (Plano de Controle)
-        print(f"Iniciando upload de '{local_path}' para '{dfs_path}'...")
-        response = self.gateway_proxy.forward_request("CopyService", "initiate_upload", dfs_path, file_info)
+        response = self.gateway_proxy.forward_request("CopyService", "initiate_upload", dfs_path, self.client_id)
         session_uri = response["session_uri"]
-        block_size = response["block_size_suggestion"]
+        endpoint = response["endpoint"]
         
         print(f"Sessão de upload iniciada. Conectando a {session_uri}")
         
@@ -50,10 +50,11 @@ class FileSystemClient:
             try:
                 with open(local_path, "rb") as f:
                     while True:
-                        chunk = f.read(block_size)
+                        chunk = f.read(64 * 1024)
                         if not chunk:
-                            break  # Fim do arquivo
-                        upload_proxy.write_chunk(chunk)
+                            upload_proxy.close(endpoint)
+                            break 
+                        endpoint = upload_proxy.write_chunk(chunk, endpoint)
                 
                 # 3. Finaliza (commita) a transação
                 print("Todos os blocos enviados. Finalizando o upload...")
@@ -70,7 +71,7 @@ class FileSystemClient:
         print(f"Iniciando download de '{dfs_path}' para '{local_path}'...")
         
         # 1. Inicia a sessão de download
-        response = self.gateway_proxy.forward_request("CopyService", "initiate_download", dfs_path)
+        response = self.gateway_proxy.forward_request("CopyService", "initiate_download", dfs_path, self.client_id)
         session_uri = response.get("session_uri")
         
         # Lida com o caso de arquivo vazio
