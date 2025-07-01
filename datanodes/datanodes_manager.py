@@ -11,7 +11,7 @@ from kafka import KafkaConsumer, KafkaProducer
 HEARTBEAT_TOPIC = "datanode_heartbeats"
 CLUSTER_UPDATE_TOPIC = "datanode_cluster_updates"
 KAFKA_SERVERS = ['localhost:9092']
-NODE_TIMEOUT_SECONDS = 45  # Considera um nó morto se não houver heartbeat por este tempo
+NODE_TIMEOUT_SECONDS = 5  # Considera um nó morto se não houver heartbeat por este tempo
 
 @Pyro5.api.expose
 class DataNodesManager:
@@ -50,12 +50,20 @@ class DataNodesManager:
             print("to funcionando XD")
             data = json.loads(kafka_message)
             node_uri = data["address"]
+            memory_used_percent = data.get("memory_used_percent", 0)
+            disk_free_gb = data.get("disk_free_gb", 0)
+            disk_read_rate_bps = data.get("disk_read_rate_bps", 0)
+            disk_write_rate_bps = data.get("disk_write_rate_bps", 0)
             
             with self.lock:
                 # Verifica se é um nó novo ou um nó que estava DOWN e voltou
                 is_new_or_resurrected = node_uri not in self.datanodes or self.datanodes[node_uri]["status"] == "DOWN"
                 
-                self.datanodes[node_uri] = {"last_seen": time.time(), "status": "UP"}
+                self.datanodes[node_uri] = {"last_seen": time.time(), "status": "UP", 
+                                            "memory_used_percent": memory_used_percent,
+                                            "disk_free_gb": disk_free_gb,
+                                            "disk_read_rate_bps": disk_read_rate_bps,
+                                            "disk_write_rate_bps": disk_write_rate_bps}
                 
                 if is_new_or_resurrected:
                     print(f"DataNode UP detectado: {node_uri}")
