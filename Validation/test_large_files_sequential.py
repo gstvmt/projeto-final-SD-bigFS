@@ -3,10 +3,11 @@ import time
 from utils import create_test_files, drop_caches
 import os
 import sys
-from monitor_resources import ResourceMonitor
+import Pyro5.api
+from monitor_resources import KafkaResourceMonitor
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))) 
-from client import Client
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../client')))
+from client import FileSystemClient
 
 def test_sequential_large_transfer():
     # Configuração
@@ -20,48 +21,19 @@ def test_sequential_large_transfer():
     drop_caches()
     
     # Inicializar cliente
-    client = Client()
+    nameserver = Pyro5.api.locate_ns()
+    client = FileSystemClient(nameserver, "Client-SequentialTest")
     
-    # Testar transferência
-    results = []
-    total_time = 0
-    
-    monitor = ResourceMonitor()
+    monitor = KafkaResourceMonitor()
     monitor.start()
     for filepath in test_files:
-        filename = os.path.basename(filepath)
-        remote_path = "remoto:"
-        file_size = os.path.getsize(filepath) / (1024 * 1024)  # MB
-        
-        print(f"\nTransferindo {filename} ({file_size:.2f} MB)...")
-        start_time = time.time()
-        result = client.copy([filepath, remote_path])
-        transfer_time = time.time() - start_time
-        
-        if "sucesso" not in result:
-            print(f"Falha ao transferir {filename}: {result}")
-            results.append((filename, False, transfer_time, "Falha na transferência"))
-            continue
-        
-        throughput = file_size / transfer_time  # MB/s
-        results.append((filename, True, transfer_time, throughput))
-        total_time += transfer_time
-        
-        print(f"Concluído em {transfer_time:.2f} segundos ({throughput:.2f} MB/s)")
-    
-    monitor.stop()
-    # Relatório
-    print("\n=== Resultados ===")
-    success_count = sum(1 for r in results if r[1])
-    print(f"Arquivos transferidos com sucesso: {success_count}/{num_files}")
-    print(f"Tempo total: {total_time:.2f} segundos")
-    
-    if success_count > 0:
-        avg_time = total_time / success_count
-        avg_throughput = sum(r[3] for r in results if r[1]) / success_count
-        print(f"Tempo médio por arquivo: {avg_time:.2f} segundos")
-        print(f"Throughput médio: {avg_throughput:.2f} MB/s")
+        base_name = os.path.basename(filepath)
+        remote_path = f"dfs:/{base_name}"
+        client.upload_file(filepath, remote_path)
 
+
+    monitor.stop()
     monitor.show_results()
+
 if __name__ == "__main__":
     test_sequential_large_transfer()

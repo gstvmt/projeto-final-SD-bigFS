@@ -94,7 +94,7 @@ class KafkaResourceMonitor:
             plt.plot(node_data['timestamps'], node_data['read_rate'], 'g-')
             plt.title('Taxa de Leitura de Disco (MB/s)')
             plt.xlabel('Tempo (s)')
-            plt.ylabel('Bytes por segundo')
+            plt.ylabel('MBytes por segundo')
             plt.grid(True)
             
             # Plot Taxa de Escrita
@@ -102,7 +102,7 @@ class KafkaResourceMonitor:
             plt.plot(node_data['timestamps'], node_data['write_rate'], 'm-')
             plt.title('Taxa de Escrita em Disco (MB/s)')
             plt.xlabel('Tempo (s)')
-            plt.ylabel('Bytes por segundo')
+            plt.ylabel('MBytes por segundo')
             plt.grid(True)
             
             plt.tight_layout()

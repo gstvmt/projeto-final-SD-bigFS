@@ -19,7 +19,7 @@ class VirtualUser(threading.Thread):
 
     def run(self):
         nameserver = Pyro5.api.locate_ns()
-        client = FileSystemClient(nameserver, self.user_id)
+        client = FileSystemClient(nameserver, f"{self.user_id}")
         while True:
             file_info = self.file_queue.get()
             if file_info is None:
@@ -29,15 +29,12 @@ class VirtualUser(threading.Thread):
             filepath = file_info
             filename = os.path.basename(filepath)
             
-            #try:
-            print(f"local path: {filepath}")
-            print(f"remote path: dfs:/teste_{self.user_id}")
-            remote_path = f"dfs:/teste_{self.user_id}"
-            client.upload_file(filepath, remote_path)
-                    
-                    
-            #except Exception as e:
-            #    print(f"Erro no usuário {self.user_id} ao processar {filename}: {e}")
+            try:
+                remote_path = f"dfs:/teste_{self.user_id}"
+                client.upload_file(filepath, remote_path)
+                        
+            except Exception as e:
+                print(f"Erro no usuário {self.user_id} ao processar {filename}: {e}")
                 
             self.file_queue.task_done()
 

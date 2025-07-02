@@ -12,7 +12,7 @@ from kafka import KafkaProducer
 
 # --- Configuração do DataNode ---
 
-HEARTBEAT_INTERVAL_SECONDS = 1
+HEARTBEAT_INTERVAL_SECONDS = 0.5
 KAFKA_TOPIC = "datanode_heartbeats"
 KAFKA_SERVERS = ['localhost:9092'] 
 

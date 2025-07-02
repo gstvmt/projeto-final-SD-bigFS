@@ -10,7 +10,7 @@ from kafka import KafkaConsumer
 KAFKA_TOPIC = "server_heartbeats"
 KAFKA_SERVERS = ['localhost:9092']  # Mude para o endereço do seu broker Kafka
 STATE_FILE = "gateway_state.json"
-HEARTBEAT_TIMEOUT_SECONDS = 45 # Tempo para considerar um servidor morto (3x o intervalo de heartbeat do servidor)
+HEARTBEAT_TIMEOUT_SECONDS = 5 # Tempo para considerar um servidor morto (3x o intervalo de heartbeat do servidor)
 
 @Pyro5.api.expose
 class APIGateway:

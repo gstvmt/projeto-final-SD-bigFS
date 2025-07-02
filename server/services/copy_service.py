@@ -250,7 +250,6 @@ class CopyService:
                 'nodes': []
             }
         
-        print(f"Sessão de upload iniciada. URI: {session_uri}, Endpoint: {endpoint}")
         return {"session_uri": str(session_uri), "endpoint": endpoint}
     
     def initiate_download(self, dfs_path, client_name):

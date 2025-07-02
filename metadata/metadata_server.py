@@ -91,8 +91,8 @@ class MetadataServerService:
             
             # Validação
             if path in self._filesystem:
-                print(f"--> Falha: O caminho '{path}' já existe.")
-                return False
+                print(f"--> O caminho '{path}' já existe.")
+                return True
             
             parent_path = os.path.dirname(path)
             if parent_path not in self._filesystem or self._filesystem[parent_path]['type'] != 'dir':
