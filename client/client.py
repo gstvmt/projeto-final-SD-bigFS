@@ -9,8 +9,8 @@ class FileSystemClient:
     Uma classe cliente que abstrai toda a comunicação com o sistema de arquivos
     distribuído por meio do API Gateway.
     """
-    def __init__(self, nameserver):
-        self.client_id = f"Client-{int(time.time())}"
+    def __init__(self, nameserver, client_id = f"Client-{int(time.time())}"):
+        self.client_id = client_id
         print("Conectando ao API Gateway via Name Server...")
         # Localiza o API Gateway usando seu nome lógico no Name Server do Pyro
         gateway_uri = nameserver.lookup("APIGateway")
