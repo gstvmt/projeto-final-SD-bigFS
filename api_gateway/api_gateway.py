@@ -210,7 +210,7 @@ if __name__ == "__main__":
     ns.register("APIGateway", uri)  # Registra o Gateway no Name Server
     
     print("="*50)
-    print(f"✅ API Gateway pronto e ouvindo em: {uri}")
+    print(f"API Gateway pronto e ouvindo em: {uri}")
     print("="*50)
     
     # 5. Iniciar o loop principal do Pyro (bloqueante)

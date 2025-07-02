@@ -185,7 +185,7 @@ if __name__ == "__main__":
 
     # 7. INICIAR O LOOP DO SERVIDOR
     print("="*50)
-    print(f"✅ Servidor de Back-end pronto e ouvindo em: {uri_para_anunciar}")
+    print(f" Servidor de Back-end pronto e ouvindo em: {uri_para_anunciar}")
     print(f"   Serviços hospedados: {service_names}")
     print(f"   Nós de dados conhecidos após bootstrap: {len(datanode_registry.get_all())}")
     print("="*50)

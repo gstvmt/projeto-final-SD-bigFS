@@ -156,7 +156,7 @@ if __name__ == "__main__":
     ns.register("MetadataService", uri)  # Registra o serviço no Name Server
     
     print("="*50)
-    print("✅ Metadata Server pronto e rodando.")
+    print(" Metadata Server pronto e rodando.")
     print(f"   Serviço disponível em: {uri}")
     print("="*50)
     

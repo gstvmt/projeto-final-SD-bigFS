@@ -138,7 +138,7 @@ if __name__ == "__main__":
     ns.register("DataNodesManager", uri)  # Registra o Manager no Name Server
     
     print("="*50)
-    print("✅ DataNodes Manager está rodando.")
+    print(" DataNodes Manager está rodando.")
     print(f"   Serviço RMI disponível em: {uri}")
     print("="*50)
     

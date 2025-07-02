@@ -205,6 +205,6 @@ if __name__ == "__main__":
     heartbeat_thread.start()
 
     print("="*50)
-    print(f"✅ DataNode '{node_id}' pronto e ouvindo em: {uri}")
+    print(f"DataNode '{node_id}' pronto e ouvindo em: {uri}")
     print("="*50)
     daemon.requestLoop() 
