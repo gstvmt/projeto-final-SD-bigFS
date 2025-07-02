@@ -1,6 +1,6 @@
 # services/copy_service.py
 
-import json
+import time
 import base64
 import Pyro5.api
 import threading
@@ -12,6 +12,10 @@ from concurrent.futures import ThreadPoolExecutor
 # ==============================================================================
 # CLASSE DE SESSÃO PARA UPLOAD
 # ==============================================================================
+
+MAX_RETRIES = 5
+RETRY_DELAY = 2
+
 @Pyro5.api.expose
 class UploadSession:
     """
@@ -25,7 +29,7 @@ class UploadSession:
         self._datanode_registry = datanode_registry
         self._dfs_path = dfs_path
         self._replica_count = replica_count
-        self.block_size = 16 * 1024 * 1024  # 16 MB
+        self.block_size = 32 * 1024 * 1024  # 32 MB
         
         self.session_id = str(uuid.uuid4())
         self.block_metadata = []
@@ -73,14 +77,42 @@ class UploadSession:
             nodes_for_replicas = endpoint_info['nodes']
         block_id = f"{p_string}_block{block_num}"
 
-        # Submete as tarefas de escrita para o pool de threads
-        futures = [
-            self.executor.submit(self._write_block_to_node, uri, block_id, chunk)
-            for uri in nodes_for_replicas
-        ]
-        results = [future.result() for future in futures]
-        if not all(results):
-            raise IOError("Falha ao escrever uma ou mais réplicas do bloco.")
+        attempt = 0
+        while attempt < MAX_RETRIES:
+            attempt += 1
+
+            # Submete as tarefas de escrita para o pool de threads
+            futures = [
+                self.executor.submit(self._write_block_to_node, uri, block_id, chunk)
+                for uri in nodes_for_replicas
+            ]
+            results = [future.result() for future in futures]
+
+            if all(results):
+                break 
+            else:
+                print(f"Falha ao escrever bloco {block_id} em uma ou mais réplicas.")
+                if attempt < MAX_RETRIES:
+                    try:
+                        for uri in nodes:
+                            print(f"Fechando bloco {block_id} no nó {uri}...")
+                            with Pyro5.api.Proxy(uri) as proxy:
+                                proxy.close_block(block_id)
+                                print(f"Bloco {block_id} fechado no nó {uri}.")
+                    except Exception as e:
+                        print(f"Erro ao fechar blocos nos nós: {e}")
+
+                    endpoint_info['current_size'] = 0
+                    active_nodes = self._datanode_registry.get_available_nodes()
+                    nodes_for_replicas = random.sample(active_nodes, k=self._replica_count)
+                    endpoint_info["nodes"] = nodes_for_replicas
+                    print(f"Aguardando {RETRY_DELAY} segundos antes de tentar novamente...")
+                    time.sleep(RETRY_DELAY)
+                else:
+                    print(f"Tentativas esgotadas para o bloco {block_id}.")
+                    raise IOError("Falha ao escrever uma ou mais réplicas do bloco após múltiplas tentativas.")
+
+
 
         endpoint_info['current_size'] += len_chunk
         # Se completou o bloco
@@ -170,9 +202,10 @@ class UploadSession:
 # ==============================================================================
 @Pyro5.api.expose
 class DownloadSession:
-    def __init__(self, daemon, block_list):
+    def __init__(self, daemon, block_list, datanode_registry):
         self._daemon = daemon
         self._block_list = sorted(block_list, key=lambda b: b['block_order'])
+        self._datanode_registry = datanode_registry
         self.session_id = str(uuid.uuid4())
         self.is_active = True
         self.buffer = queue.Queue(maxsize=10)
@@ -192,14 +225,27 @@ class DownloadSession:
             # Propaga a exceção para ser colocada no buffer
             raise
 
+    def _choose_active_replica(self, replicas, active_nodes):
+        active_replicas = [replica for replica in replicas if replica in active_nodes]
+        if not active_replicas:
+            return None  # Nenhuma réplica ativa
+        return random.choice(active_replicas)
+    
     def _prefetch_blocks(self):
+        
         with ThreadPoolExecutor(max_workers=5) as executor:
-            # CORREÇÃO: Usa a função auxiliar para fazer a chamada RMI
-            future_reads = {
-                # Para robustez, escolhe uma réplica aleatória para ler
-                executor.submit(self._read_block_from_node, random.choice(block['replicas']), block['block_id']): block
-                for block in self._block_list
-            }
+            future_reads = {}
+            for block in self._block_list:
+                active_nodes = self._datanode_registry.get_available_nodes()
+                chosen_replica = self._choose_active_replica(block['replicas'], active_nodes)
+                if chosen_replica:
+                    future = executor.submit(self._read_block_from_node, chosen_replica, block['block_id'])
+                    future_reads[future] = block
+                else:
+                    # Se nenhuma réplica está disponível, já coloca a exceção no buffer para o cliente saber
+                    self.buffer.put(Exception(f"Nenhuma réplica ativa disponível para o bloco {block['block_id']}"))
+
+
             for future in future_reads:
                 try:
                     block_data = future.result()
@@ -265,6 +311,6 @@ class CopyService:
             return {"session_uri": None, "message": "Arquivo vazio."}
 
         # CORREÇÃO: Não precisa mais passar o datanode_client
-        session = DownloadSession(self._daemon, block_list)
+        session = DownloadSession(self._daemon, block_list, self._datanode_registry)
         session_uri = self._daemon.register(session)
         return {"session_uri": str(session_uri)}
