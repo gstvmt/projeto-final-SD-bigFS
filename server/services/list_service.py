@@ -9,10 +9,11 @@ class ListService:
     def ls(self, path, long_format=False):
         """
         Simula o comando 'ls'.
-        
-        :param path: O caminho do diretório a ser listado.
-        :param long_format: Se True, retorna detalhes (simula o 'ls -l').
-        :return: Uma lista de nomes de arquivos/diretórios ou uma lista de dicionários com detalhes.
+        Parametros:
+            path: O caminho do diretório a ser listado.
+            long_format: Se True, retorna detalhes (simula o 'ls -l').
+        Retorno:
+            Uma lista de nomes de arquivos/diretórios ou uma lista de dicionários com detalhes.
         """
         print(f"[ListService] Executando ls para o caminho: '{path}' (long_format={long_format})")
         dir_info = self._metadata_repo.get_entry(path)

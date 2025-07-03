@@ -6,26 +6,32 @@ import base64
 
 class FileSystemClient:
     """
-    Uma classe cliente que abstrai toda a comunicação com o sistema de arquivos
-    distribuído por meio do API Gateway.
+    Classe que faz a interface do cliente com o sistema implementado.
     """
     def __init__(self, nameserver, client_id = f"Client-{int(time.time())}"):
-        self.client_id = client_id
+
         print("Conectando ao API Gateway via Name Server...")
-        # Localiza o API Gateway usando seu nome lógico no Name Server do Pyro
-        gateway_uri = nameserver.lookup("APIGateway")
+
+        self.client_id = client_id
+        gateway_uri = nameserver.lookup("APIGateway")  # Localiza o API Gateway
         if not gateway_uri:
             raise ConnectionError("Não foi possível encontrar o 'APIGateway' no Name Server.")
         
-        self.gateway_proxy = Pyro5.api.Proxy(gateway_uri)
+        self.gateway_proxy = Pyro5.api.Proxy(gateway_uri) # Instancia o proxy do API Gateway
         print(f"Conectado com sucesso ao API Gateway em: {gateway_uri}")
 
+ # ====================================== Metodos ===========================================
+
     def list_directory(self, dfs_path, long_format=False):
-        """Abstrai a chamada para o serviço 'ls'."""
+        """
+        Abstrai a chamada para o serviço List.
+        """
         return self.gateway_proxy.forward_request("ListService", "ls", dfs_path, long_format=long_format)
 
     def remove_file(self, dfs_path):
-        """Abstrai a chamada para o serviço 'rm'."""
+        """
+        Abstrai a chamada para o serviço Remove.
+        """
         return self.gateway_proxy.forward_request("RemoveService", "rm", dfs_path)
 
     def upload_file(self, local_path, dfs_path):
@@ -38,14 +44,14 @@ class FileSystemClient:
         file_size = os.path.getsize(local_path)
         file_info = {"size": file_size}
         
-        # 1. Inicia a sessão de upload (Plano de Controle)
+        # Inicia a sessão de upload
         response = self.gateway_proxy.forward_request("CopyService", "initiate_upload", dfs_path, self.client_id)
         session_uri = response["session_uri"]
         endpoint = response["endpoint"]
         
         print(f"Sessão de upload iniciada. Conectando a {session_uri}")
         
-        # 2. Conecta à sessão e envia os dados em blocos (Plano de Dados)
+        # Conecta à sessão e envia os dados em blocos 
         with Pyro5.api.Proxy(session_uri) as upload_proxy:
             try:
                 with open(local_path, "rb") as f:
@@ -70,7 +76,7 @@ class FileSystemClient:
         """
         print(f"Iniciando download de '{dfs_path}' para '{local_path}'...")
         
-        # 1. Inicia a sessão de download
+        # Inicia a sessão de download
         response = self.gateway_proxy.forward_request("CopyService", "initiate_download", dfs_path, self.client_id)
         session_uri = response.get("session_uri")
         
@@ -81,7 +87,7 @@ class FileSystemClient:
 
         print(f"Sessão de download iniciada. Conectando a {session_uri}")
         
-        # 2. Conecta à sessão e baixa os dados em streaming
+        # Conecta à sessão de Download
         try:
             with Pyro5.api.Proxy(session_uri) as download_proxy, open(local_path, "wb") as f:
                 while True:
@@ -94,22 +100,31 @@ class FileSystemClient:
             return {"status": "success", "message": f"Download concluído. Arquivo salvo em '{local_path}'."}
         except Exception as e:
             print(f"Erro durante o download: {e}")
-            # Em uma implementação real, o download_proxy também poderia ter um método 'abort'
             raise
 
+# ====================================== Funções Auxiliares ===========================================
+
 def print_ls_result(result):
-    """Formata a saída do comando 'ls'."""
+    """
+    Formata a saída do comando 'ls'.
+    """
+
     if not result: return
+
+    # long format
     if isinstance(result[0], dict):
         print(f"{'TYPE':<6} {'SIZE':>10} {'NAME'}")
         print("-"*28)
         for item in result:
             print(f"{item.get('type', 'N/A'):<6} {item.get('size', 0):>10} {item.get('name', 'N/A')}")
     else:
-        print("  ".join(result))
+        print("  ".join(result)) # formato simples
+
 
 def main_shell(client: FileSystemClient):
-    """O laço principal que simula o shell."""
+    """
+    O laço principal que simula o shell.
+    """
     print("\nShell do Sistema de Arquivos Distribuído. Digite 'exit' para sair.")
     print("Use o prefixo 'dfs:' para caminhos remotos. Ex: 'ls dfs:/'")
 
@@ -160,14 +175,13 @@ def main_shell(client: FileSystemClient):
         except Exception as e:
             print(f"ERRO DE EXECUÇÃO: {e}")
 
+# ====================================== MAIN ===========================================
+
 if __name__ == "__main__":
     try:
-        # Encontra o Name Server automaticamente na rede
-        nameserver = Pyro5.api.locate_ns()
-        # Cria a instância do cliente que se conecta ao Gateway
-        fs_client = FileSystemClient(nameserver)
-        # Inicia o shell
-        main_shell(fs_client)
+        nameserver = Pyro5.api.locate_ns()           # Localiza o Pyro Name Server
+        fs_client = FileSystemClient(nameserver)     # Cria o cliente do sistema de arquivos
+        main_shell(fs_client)                        # Inicia o shell
     except Pyro5.errors.NamingError:
         print("Erro: Não foi possível localizar o Pyro Name Server.")
         print("Certifique-se de que ele está rodando com o comando: python -m Pyro5.nameserver")

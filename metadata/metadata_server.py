@@ -1,5 +1,3 @@
-# metadata_server.py
-
 import threading
 import json
 import os
@@ -8,17 +6,19 @@ import Pyro5.api
 import Pyro5.server
 from kafka import KafkaProducer
 
-# --- Configuração ---
+# --- Constantes de Configuração ------------------
 STATE_FILE = "metadata_storage.json"
 KAFKA_SERVERS = ['localhost:9092']
 INVALIDATION_TOPIC = "metadata_invalidation_events"
+# -------------------------------------------------
 
 @Pyro5.api.expose
 class MetadataServerService:
     """
-    O cérebro do sistema de arquivos distribuído.
+    Servidor de Metadados para o sistema de arquivos distribuído.
     Mantém a estrutura de diretórios e a localização dos blocos de dados.
     """
+
     def __init__(self):
         self._filesystem = {}
         self._lock = threading.Lock()
@@ -28,6 +28,7 @@ class MetadataServerService:
                 bootstrap_servers=KAFKA_SERVERS,
                 value_serializer=lambda v: json.dumps(v).encode('utf-8')
             )
+
         except Exception as e:
             print(f"AVISO: Não foi possível conectar ao Kafka Producer: {e}. A invalidação de cache estará desativada.")
             self._producer = None
@@ -36,7 +37,10 @@ class MetadataServerService:
         print("Metadata Server inicializado.")
 
     def _load_state_from_disk(self):
-        """Carrega o estado do sistema de arquivos do disco na inicialização."""
+        """
+        Carrega o estado do sistema de arquivos do disco na inicialização.
+        """
+
         with self._lock:
             if os.path.exists(STATE_FILE):
                 print(f"Carregando estado do arquivo: {STATE_FILE}")
@@ -53,13 +57,17 @@ class MetadataServerService:
             self._save_state_to_disk() # Garante que o arquivo seja criado se não existir
 
     def _initialize_default_state(self):
-        """Cria a estrutura de diretório raiz se o sistema estiver vazio."""
+        """
+        Cria a estrutura de diretório raiz se o sistema estiver vazio.
+        """
         self._filesystem = {
             "/": {"type": "dir", "children": []}
         }
 
     def _save_state_to_disk(self):
-        """Salva o estado atual do sistema de arquivos em disco. Deve ser chamado dentro de um lock."""
+        """
+        Salva o estado atual do sistema de arquivos em disco. Deve ser chamado dentro de um lock.
+        """
         try:
             with open(STATE_FILE, 'w') as f:
                 json.dump(self._filesystem, f, indent=4)
@@ -67,7 +75,9 @@ class MetadataServerService:
             print(f"ERRO CRÍTICO ao salvar estado no disco: {e}")
 
     def _publish_invalidation(self, path: str):
-        """Publica um evento de invalidação de cache no Kafka."""
+        """
+        Publica um evento de invalidação de cache no Kafka.
+        """
         if not self._producer:
             return
             
@@ -77,15 +87,18 @@ class MetadataServerService:
 
     @Pyro5.api.expose
     def get_fs_entry(self, path: str):
-        """Retorna os metadados para um dado caminho."""
+        """
+        Retorna os metadados para um dado caminho.
+        """
         with self._lock:
             print(f"[RMI Call] get_fs_entry para: {path}")
-            # Retorna uma cópia para evitar que clientes modifiquem o estado interno
             return self._filesystem.get(path, None)
 
     @Pyro5.api.expose
     def add_fs_entry(self, path: str, entry_data: dict) -> bool:
-        """Adiciona uma nova entrada (arquivo/diretório) no sistema."""
+        """
+        Adiciona uma nova entrada (arquivo/diretório) no sistema.
+        """
         with self._lock:
             print(f"[RMI Call] add_fs_entry para: {path}")
             
@@ -114,7 +127,9 @@ class MetadataServerService:
 
     @Pyro5.api.expose
     def remove_fs_entry(self, path: str) -> bool:
-        """Remove uma entrada do sistema."""
+        """
+        Remove uma entrada do sistema.
+        """
         with self._lock:
             print(f"[RMI Call] remove_fs_entry para: {path}")
             
@@ -128,11 +143,11 @@ class MetadataServerService:
             
             entry_data = self._filesystem[path]
             if entry_data['type'] == 'dir' and entry_data['children']:
-                # Simplificação: não permite remover diretórios não vazios.
+                # não permite remover diretórios não vazios.
                 print(f"--> Falha: O diretório '{path}' não está vazio.")
                 return False
                 
-            # Modificação
+            # deleta a entrada e atualiza o diretório pai    
             del self._filesystem[path]
             parent_path = os.path.dirname(path)
             filename = os.path.basename(path)

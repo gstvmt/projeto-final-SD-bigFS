@@ -1,14 +1,10 @@
 import Pyro5.api
 import threading
 
-# File: server/shared/metadata_repo.py
 class MetadataRepository:
     def __init__(self, remote_metadata_service_uri):
         """
         Inicializa o repositório com um cache local e um proxy para o serviço remoto.
-        
-        :param local_cache: Um dicionário simples para servir de cache em memória.
-        :param remote_metadata_service_proxy: Um proxy Pyro para o Servidor de Metadados.
         """
         self._cache = {}
         self._remote_service = Pyro5.api.Proxy(remote_metadata_service_uri) 
@@ -20,17 +16,17 @@ class MetadataRepository:
         Obtém informações de uma entrada (arquivo/diretório).
         Implementa a lógica: "tenta no cache, senão busca remotamente e atualiza o cache".
         """
-        # 1. Tenta buscar no cache local
+        # Tenta buscar no cache local
         self._remote_service._pyroClaimOwnership()
         if path in self._cache:
             print(f"[MetadataRepository] CACHE HIT para: {path}")
             return self._cache[path]
         
-        # 2. Se não achou, busca no serviço remoto
+        # Se não achou, busca no serviço remoto
         print(f"[MetadataRepository] CACHE MISS para: {path}. Buscando remotamente...")
         remote_data = self._remote_service.get_fs_entry(path)
         
-        # 3. Adiciona no cache local para a próxima vez
+        # Adiciona no cache local para a próxima vez
         if remote_data:
             self._cache[path] = remote_data
         

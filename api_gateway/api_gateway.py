@@ -8,36 +8,37 @@ from kafka import KafkaConsumer
 
 # --- Constantes de Configuração ---
 KAFKA_TOPIC = "server_heartbeats"
-KAFKA_SERVERS = ['localhost:9092']  # Mude para o endereço do seu broker Kafka
+KAFKA_SERVERS = ['localhost:9092']  
 STATE_FILE = "gateway_state.json"
-HEARTBEAT_TIMEOUT_SECONDS = 5 # Tempo para considerar um servidor morto (3x o intervalo de heartbeat do servidor)
+HEARTBEAT_TIMEOUT_SECONDS = 5              # Tempo para considerar um servidor morto (3x o intervalo de heartbeat do servidor)
+# ----------------------------------
 
 @Pyro5.api.expose
 class APIGateway:
     def __init__(self):
         """
         Inicializa o API Gateway.
-        - Carrega o estado do disco, se existir.
+        - Carrega o estado das tabelas armazenado em disco, se existir.
         - Inicializa as estruturas de dados para roteamento e monitoramento.
         - Cria um Lock para garantir a segurança em ambiente com múltiplas threads.
         """
         print("Iniciando API Gateway...")
-        # Tabela principal de roteamento: {"ServiceName": ["URI1", "URI2", ...]}
-        self.service_routing_table = {}
-        # Contadores para o balanceamento de carga Round-Robin
-        self.round_robin_counter = 0
-        # Rastreia o último heartbeat de cada servidor para detectar falhas
-        self.server_last_heartbeat = {}
-        
-        # O Lock é ESSENCIAL para proteger o acesso às estruturas de dados acima,
-        # já que elas serão acessadas pela thread do Kafka e pelas threads do Pyro.
-        self.lock = threading.Lock()
+
+        self.service_routing_table = {}    # Tabela sevicos para roteamento: {"ServiceName": ["URI1", "URI2", ...]}
+        self.round_robin_counter = 0       # Contador para o balanceamento de carga Round-Robin entre os servidores
+        self.server_last_heartbeat = {}    # Rastreia e armazena o último heartbeat de cada servidor.
+        self.lock = threading.Lock()       # lock para acesso as tabelas
 
         self.load_state_from_disk()
         print(f"Estado inicial carregado. Tabela de roteamento: {self.service_routing_table}")
 
+    # =========================== Metodos==============================
+
     def load_state_from_disk(self):
-        """Carrega a tabela de roteamento de um arquivo JSON para persistência."""
+        """
+        Carrega os dados de operacao do servidor armazenados em um JSON. (se existir)
+        """
+
         with self.lock:
             if os.path.exists(STATE_FILE):
                 try:
@@ -45,16 +46,18 @@ class APIGateway:
                         state = json.load(f)
                         self.service_routing_table = state.get("routing_table", {})
                         self.round_robin_counters = state.get("rr_counter", int)
+                        self.server_last_heartbeat = state.get("last_heartbeat", {})
                         print("Estado recuperado do disco com sucesso.")
                 except (json.JSONDecodeError, IOError) as e:
                     print(f"Erro ao ler o arquivo de estado: {e}. Começando com estado vazio.")
 
     def save_state_to_disk(self):
-        """Salva o estado atual da tabela de roteamento em um arquivo JSON."""
-        # Esta função deve ser chamada dentro de um 'with self.lock:'
+        """Salva o estado atual dos metadados em um arquivo JSON."""
+
         state = {
             "routing_table": self.service_routing_table,
-            "rr_counter": self.round_robin_counter
+            "rr_counter": self.round_robin_counter,
+            "last_heartbeat": self.server_last_heartbeat
         }
         try:
             with open(STATE_FILE, 'w') as f:
@@ -65,8 +68,9 @@ class APIGateway:
     def _heartbeat_callback(self, kafka_message):
         """
         Processa uma mensagem de heartbeat recebida do Kafka.
-        Esta função é o "cérebro" da descoberta de serviço.
+        Esta função é o cérebro da descoberta de serviço.
         """
+
         try:
             heartbeat_data = json.loads(kafka_message)
             daemon_location = heartbeat_data["daemon_location"]
@@ -78,13 +82,13 @@ class APIGateway:
                 # Atualiza o timestamp do último heartbeat
                 self.server_last_heartbeat[daemon_location] = time.time()
                 
-                # Lógica de "upsert": Adiciona ou atualiza os serviços na tabela de roteamento
+                # Adiciona ou atualiza os serviços na tabela de roteamento
                 for service_name in hosted_services:
                     # Garante que a lista para o serviço exista
                     if service_name not in self.service_routing_table:
                         self.service_routing_table[service_name] = []
                     
-                    # Adiciona a URI do servidor à lista do serviço, se ainda não estiver lá
+                    # Adiciona a URI do sevico à lista do servicos, se ainda não estiver lá
                     service_uri = f"PYRO:{service_name}@{daemon_location}"
                     if service_uri not in self.service_routing_table[service_name]:
                         self.service_routing_table[service_name].append(service_uri)
@@ -97,9 +101,10 @@ class APIGateway:
 
     def _reaper_thread_func(self):
         """
-        Thread "Ceifadora" que remove servidores mortos (que não enviam heartbeat).
+        Thread que remove servidores mortos (que não enviam heartbeat).
         """
         print("Thread Reaper iniciada. Verificando servidores mortos...")
+
         while True:
             time.sleep(HEARTBEAT_TIMEOUT_SECONDS / 2) # Verifica na metade do tempo do timeout
             
@@ -129,16 +134,12 @@ class APIGateway:
                     
                     self.save_state_to_disk()
 
-    @Pyro5.api.oneway
-    def log_message(self, message):
-        """Um método simples para teste de chamada oneway."""
-        print(f"MENSAGEM DE LOG RECEBIDA: {message}")
-
+    
     @Pyro5.api.expose
     def forward_request(self, service_name, method_name, *args, **kwargs):
         """
         O principal método do Gateway. Recebe uma requisição e a encaminha
-        para o serviço de back-end apropriado usando balanceamento de carga.
+        para o serviço apropriado usando balanceamento de carga.
         """
         print(f"Requisição recebida para: {service_name}.{method_name}")
         
@@ -160,58 +161,61 @@ class APIGateway:
         print(f"Encaminhando para: {chosen_uri}")
         
         try:
-            # Cria o proxy para o servidor escolhido sob demanda
-            with Pyro5.api.Proxy(chosen_uri) as backend_proxy:
-                # Pega o método desejado do objeto remoto
-                remote_method = getattr(backend_proxy, method_name)
-                # Invoca o método e retorna o resultado
-                return remote_method(*args, **kwargs)
+            with Pyro5.api.Proxy(chosen_uri) as backend_proxy:         # Cria o proxy para o servidor escolhido sob demanda
+                remote_method = getattr(backend_proxy, method_name)    # Pega o método desejado do objeto remoto
+                return remote_method(*args, **kwargs)                  # Invoca o método e retorna o resultado
         except Exception as e:
             print(f"ERRO CRÍTICO ao se comunicar com o servidor de back-end {chosen_uri}: {e}")
-            # Em uma implementação mais avançada, poderia haver uma nova tentativa
-            # ou a remoção imediata do servidor problemático.
             raise ConnectionError(f"Falha ao contatar o serviço de back-end em {chosen_uri}")
 
+# ==================================== Thread do Kafka Consumer =========================
 
 def kafka_consumer_thread_func(gateway: APIGateway):
-    """Thread que consome o tópico Kafka e chama o callback do gateway."""
+    """
+    Thread que consome o tópico Kafka e chama o callback do gateway.
+    """
     print("Thread Kafka Consumer iniciada.")
+
     try:
         consumer = KafkaConsumer(
             KAFKA_TOPIC,
             bootstrap_servers=KAFKA_SERVERS,
             auto_offset_reset='latest', # Começa a ler as mensagens mais recentes
-            group_id='api-gateway-group' # Permite escalar o gateway no futuro
+            group_id='api-gateway-group' 
         )
         for message in consumer:
             gateway._heartbeat_callback(message.value.decode('utf-8'))
     except Exception as e:
         print(f"Erro fatal na thread do Kafka Consumer: {e}. A thread será encerrada.")
 
+
+# ==================================== MAIN =========================================
+
 if __name__ == "__main__":
-    # 1. Instanciar o Gateway
-    gateway = APIGateway()
+
+    gateway = APIGateway()  # instancia do gateway
     
-    # 2. Configurar e iniciar a thread do consumer Kafka
+    # configuracao e inicializacao da thread do consumer Kafka
     kafka_thread = threading.Thread(target=kafka_consumer_thread_func, args=(gateway,))
     kafka_thread.daemon = True
     kafka_thread.start()
     
-    # 3. Configurar e iniciar a thread "Reaper"
+    # configuracao e inicializacao da reaper thread
     reaper_thread = threading.Thread(target=gateway._reaper_thread_func)
     reaper_thread.daemon = True
     reaper_thread.start()
 
-    # 4. Configurar e iniciar o daemon do Pyro
-    # PONTO CRÍTICO: Usar 'pooled' para paralelismo real.
+    # configuracao e inicializacao do daemon do Pyro
     daemon = Pyro5.server.Daemon()
     uri = daemon.register(gateway, objectId="APIGateway")
-    ns = Pyro5.api.locate_ns()  # Localiza o Name Server Pyro
-    ns.register("APIGateway", uri)  # Registra o Gateway no Name Server
+
+    # localizacao e registro no Name Server Pyro
+    ns = Pyro5.api.locate_ns() 
+    ns.register("APIGateway", uri)  
     
     print("="*50)
     print(f"API Gateway pronto e ouvindo em: {uri}")
     print("="*50)
     
-    # 5. Iniciar o loop principal do Pyro (bloqueante)
+    # loop principal
     daemon.requestLoop()

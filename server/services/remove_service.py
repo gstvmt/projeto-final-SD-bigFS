@@ -5,8 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 class RemoveService:
     def __init__(self, metadata_repo):
         """
-        Inicializa o serviço de remoção apenas com a dependência do
-        repositório de metadados.
+        Implementa o serviço de remoção de arquivos e diretórios (vazios) do sistema.
         """
         self._metadata_repo = metadata_repo
         print("RemoveService (versão simplificada) inicializado.")
@@ -32,10 +31,9 @@ class RemoveService:
         """
         print(f"[RemoveService] Iniciando remoção para: '{path}'")
 
-        # 1. Pegar a entrada do arquivo no servidor de metadados
+        # Acessa a entrada do arquivo no servidor de metadados
         entry_info = self._metadata_repo.get_entry(path)
 
-        # 2. Validação
         if not entry_info:
             raise FileNotFoundError(f"Arquivo ou diretório não encontrado: {path}")
 
@@ -44,7 +42,7 @@ class RemoveService:
                 raise IsADirectoryError(f"Não é possível remover '{path}': é um diretório não vazio.")
             print(f"Removendo diretório '{path}'...")
             
-        # 3. Remoção paralela dos blocos
+        # Remoção paralela dos blocos
         if entry_info.get("type") == "file" and "blocks" in entry_info:
             with ThreadPoolExecutor(max_workers=10) as executor:
                 # Cria uma lista de tarefas. Cada tarefa é uma chamada para deletar uma réplica de um bloco.
@@ -58,10 +56,9 @@ class RemoveService:
                 # Verifica se todas as tarefas foram bem-sucedidas
                 results = [future.result() for future in tasks]
                 if not all(results):
-                    # Em um sistema real, aqui teríamos uma lógica mais robusta
                     raise IOError("Falha ao deletar um ou mais blocos de dados. Operação de remoção abortada.")
 
-        # 4. Atualizar a tabela de metadados
+        # Atualiza a tabela de metadados
         print(f"Blocos de dados para '{path}' removidos. Atualizando metadados...")
         success = self._metadata_repo.remove_entry(path)
 

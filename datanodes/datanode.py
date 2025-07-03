@@ -1,5 +1,3 @@
-# datanode.py - Classe DataNodeService modificada
-
 import os
 import Pyro5.api
 import socket
@@ -10,16 +8,15 @@ import psutil
 import base64
 from kafka import KafkaProducer
 
-# --- Configuração do DataNode ---
-
+# --- Constantes de Configuração ---
 HEARTBEAT_INTERVAL_SECONDS = 0.5
 KAFKA_TOPIC = "datanode_heartbeats"
 KAFKA_SERVERS = ['localhost:9092'] 
-
 #-----------------------------------
 
 @Pyro5.api.expose
 class DataNodeService:
+    
     def __init__(self, node_id, storage_path):
         self._node_id = node_id
         self._storage_path = storage_path
@@ -32,15 +29,14 @@ class DataNodeService:
         else:
             print(f"[{self._node_id}] Utilizando diretório de armazenamento: {self._storage_path}")
 
+# ========================================= Metodos ================================================
+
     def _get_block_filepath(self, block_id: str) -> str:
-        """
-        Gera um caminho de arquivo seguro para um block_id, prevenindo ataques
-        de path traversal.
-        """
+
         # Junta o storage_path com o block_id (permitindo subdiretórios dentro do block_id)
         full_path = os.path.join(self._storage_path, block_id)
         
-        # Garante que o caminho gerado esteja dentro da raiz _storage_path
+        # Garante que o caminho gerado esteja dentro da raiz e exista
         full_path = os.path.abspath(full_path)
         if not os.path.exists(full_path):
             print(f"Criando arquivos full_path: {full_path}")
@@ -49,6 +45,7 @@ class DataNodeService:
         return full_path
 
     def write_block(self, block_id, data):
+
         data = base64.b64decode(data.get("data")) if isinstance(data, dict) else data
 
         filepath = self._get_block_filepath(block_id)
@@ -71,43 +68,7 @@ class DataNodeService:
 
 
     def close_block(self, block_id):
-        """
-            Fecha um bloco aberto e o mantém no armazenamento.
-
-            -------------------------------------------------------
-            Funcionamento geral:
-                Esta função fecha um bloco que estava aberto para leitura/escrita,
-                liberando os recursos associados enquanto mantém o bloco armazenado.
-
-            -------------------------------------------------------
-            Principais tarefas da função:
-
-                1. Obtém um lock para garantir operação thread-safe.
-                
-                2. Localiza o arquivo correspondente ao índice fornecido.
-                
-                3. Fecha o arquivo e remove sua referência da lista de arquivos abertos.
-
-            -------------------------------------------------------
-            Variáveis e estruturas importantes:
-
-            - `self.lock`: Objeto de lock para sincronização de threads.
-            - `self.opened_files`: Dicionário que mapeia índices para objetos de arquivo abertos.
-                Formato:
-                    self.opened_files = {
-                        <index>: <file_object>,
-                        ...
-                    }
-
-            -------------------------------------------------------
-            Parâmetros:
-                :param index: (int) Índice do arquivo a ser fechado (retornado por open_file).
-
-            -------------------------------------------------------
-            Retorno:
-                None
-
-        """
+        
         try:
             filepath = self._get_block_filepath(block_id)
 
@@ -143,7 +104,8 @@ class DataNodeService:
         except IOError as e:
             print(f"ERRO ao deletar bloco '{block_id}' do disco: {e}")
             return False
-        
+
+# ========================================= Heartbeat Producer Thread ================================================
 
 def heartbeat_producer(datanode_uri, node_id):
 
@@ -191,9 +153,11 @@ def heartbeat_producer(datanode_uri, node_id):
         producer.send(KAFKA_TOPIC, payload)
         time.sleep(HEARTBEAT_INTERVAL_SECONDS) 
 
+# ========================================= Main ================================================
+
 if __name__ == "__main__":
 
-# Usamos o nome do host para ter um ID único se rodarmos vários na mesma máquina
+    # Usamos o nome do host para ter um ID único se rodarmos vários na mesma máquina
     node_id = f"datanode-{socket.gethostname()}-{time.time_ns()}"
     
     daemon = Pyro5.server.Daemon()

@@ -1,5 +1,3 @@
-# backend_server.py
-
 import threading
 import time
 import json
@@ -96,11 +94,9 @@ def cache_invalidation_consumer(repo: MetadataRepository):
 
 if __name__ == "__main__":
 
-    # 1. OBTER AS REFERENCIAS REMOTAS ESSENCIAIS
+    # REFERENCIAS REMOTAS ESSENCIAIS
 
-    ns_ip = "localhost"  # IP do Name Server Pyro
-    ns_port = 9090  # Porta do Name Server Pyro
-    ns = Pyro5.api.locate_ns(ns_ip, ns_port)
+    ns = Pyro5.api.locate_ns()  # Localiza o Name Server Pyro
     try:
         manager_uri = ns.lookup("DataNodesManager")
         assert str(manager_uri).startswith("PYRO:"), "URI inválida."
@@ -116,14 +112,14 @@ if __name__ == "__main__":
         exit(1)
 
 
-    # 2. CRIAR COMPONENTES COMPARTILHADOS
+    # COMPONENTES COMPARTILHADOS
 
     print("Inicializando componentes compartilhados...")
     datanode_registry = DataNodeRegistry()
     metadata_repo = MetadataRepository(metadata_service_uri)
     
     
-    # 3. LÓGICA DE BOOTSTRAP - BUSCAR ESTADO INICIAL
+    # LÓGICA DE BOOTSTRAP - BUSCAR ESTADO INICIAL
     try:
         print(f"Realizando bootstrap com o DataNodesManager em {manager_uri}...")
         with Pyro5.api.Proxy(manager_uri) as manager_proxy:
@@ -134,10 +130,10 @@ if __name__ == "__main__":
         print(f"ERRO CRÍTICO: Falha ao realizar bootstrap: {e}. O servidor pode operar sem a lista completa de DataNodes.")
 
    
-    # 4. CONFIGURAR O DAEMON PYRO  
+    # INSTANCIAR O DAEMON PYRO  
     daemon = Pyro5.server.Daemon()
 
-    # 5. INSTANCIAR E REGISTRAR OS SERVIÇOS
+    # INSTANCIAR E REGISTRAR OS SERVIÇOS
     print("Instanciando e registrando serviços...")
     list_svc = ListService(metadata_repo)
     remove_svc = RemoveService(metadata_repo) # Este serviço também precisaria do DataNodeClient
@@ -151,7 +147,7 @@ if __name__ == "__main__":
     uri_para_anunciar = str(daemon.uriFor(list_svc))
     uri_para_anunciar = uri_para_anunciar.split('@')[1] 
 
-    # 6. INICIAR THREADS DE BACKGROUND
+    # INICIAR THREADS DE BACKGROUND
     try:
         # Thread para o heartbeat deste próprio servidor
         kafka_producer = KafkaProducer(
@@ -183,7 +179,7 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"ERRO CRÍTICO ao iniciar threads de background com o Kafka: {e}")
 
-    # 7. INICIAR O LOOP DO SERVIDOR
+    # INICIAR O LOOP DO SERVIDOR
     print("="*50)
     print(f" Servidor de Back-end pronto e ouvindo em: {uri_para_anunciar}")
     print(f"   Serviços hospedados: {service_names}")

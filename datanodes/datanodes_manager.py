@@ -7,21 +7,23 @@ import Pyro5.api
 import Pyro5.server
 from kafka import KafkaConsumer, KafkaProducer
 
-# --- Configuração ---
+# --- Constantes de Configuração ---
 HEARTBEAT_TOPIC = "datanode_heartbeats"
 CLUSTER_UPDATE_TOPIC = "datanode_cluster_updates"
 KAFKA_SERVERS = ['localhost:9092']
-NODE_TIMEOUT_SECONDS = 5  # Considera um nó morto se não houver heartbeat por este tempo
+NODE_TIMEOUT_SECONDS = 5                           # Considera um nó morto se não houver heartbeat por este tempo
+# ----------------------------------
 
 @Pyro5.api.expose
 class DataNodesManager:
     """
     Gerencia o estado dos DataNodes. Atua como um consumidor Kafka para heartbeats,
     um produtor Kafka para atualizações de cluster e um servidor Pyro para
-    fornecer snapshots do estado atual.
+    fornecer informacoes de todos os nos ativos no momento.
     """
+
     def __init__(self):
-        self.datanodes = {}  # Estrutura: {"uri": {"last_seen": timestamp, "status": "UP"}}
+        self.datanodes = {} 
         self.lock = threading.Lock()
         try:
             self.producer = KafkaProducer(
@@ -31,11 +33,14 @@ class DataNodesManager:
         except Exception as e:
             print(f"ERRO CRÍTICO ao conectar ao Kafka Producer: {e}. O Manager não poderá publicar atualizações.")
             self.producer = None
-        
         print("DataNodes Manager inicializado.")
 
+#================================= Metodos ===========================================
+
     def publish_update(self, event_type: str, node_uri: str):
-        """Publica uma mudança no estado do cluster para os servidores."""
+        """
+        Publica uma mudança no estado do cluster para os servidores.
+        """
         if not self.producer:
             print("AVISO: Kafka Producer não está disponível. Pulando publicação de atualização.")
             return
@@ -45,7 +50,9 @@ class DataNodesManager:
         self.producer.send(CLUSTER_UPDATE_TOPIC, message)
 
     def _heartbeat_callback(self, kafka_message: bytes):
-        """Processa um heartbeat de um DataNode."""
+        """
+        Processa um heartbeat de um DataNode.
+        """
         try:
             print("to funcionando XD")
             data = json.loads(kafka_message)
@@ -73,8 +80,11 @@ class DataNodesManager:
             print(f"Erro ao processar heartbeat: {e}")
 
     def _reaper_thread_func(self):
-        """Thread que remove nós que não enviam heartbeats."""
+        """
+        Thread que remove nós que não enviam heartbeats.
+        """
         print("Thread Reaper de DataNodes iniciada.")
+
         while True:
             time.sleep(NODE_TIMEOUT_SECONDS / 2)
             
@@ -96,6 +106,7 @@ class DataNodesManager:
         Método RMI exposto para bootstrap. Retorna a lista de URIs de nós ativos.
         """
         print("[RMI Call] Recebida requisição para obter nós ativos...")
+
         with self.lock:
             active_nodes = [
                 uri for uri, status_info in self.datanodes.items()
@@ -104,9 +115,14 @@ class DataNodesManager:
         print(f"[RMI Call] Retornando {len(active_nodes)} nós ativos.")
         return active_nodes
 
+#================================= Thread Consumer kafka ===========================================
+
 def kafka_consumer_thread_func(manager: DataNodesManager):
-    """Consome o tópico de heartbeats e chama o callback."""
+    """
+    Consome o tópico de heartbeats e chama o callback.
+    """
     print("Thread consumidora de heartbeats de DataNode iniciada.")
+
     try:
         consumer = KafkaConsumer(
             HEARTBEAT_TOPIC,
@@ -118,11 +134,14 @@ def kafka_consumer_thread_func(manager: DataNodesManager):
     except Exception as e:
         print(f"Erro fatal na thread do Kafka Consumer: {e}. A thread será encerrada.")
 
+#======================================== Main ================================================
+
 if __name__ == "__main__":
-    # 1. Instanciar o Manager
+    
+    # instancia um manager
     manager = DataNodesManager()
     
-    # 2. Iniciar as threads de background (Kafka consumer e Reaper)
+    # inicia as threads de background (Kafka consumer e Reaper)
     consumer_thread = threading.Thread(target=kafka_consumer_thread_func, args=(manager,))
     consumer_thread.daemon = True
     consumer_thread.start()
@@ -131,7 +150,7 @@ if __name__ == "__main__":
     reaper_thread.daemon = True
     reaper_thread.start()
     
-    # 3. Iniciar o daemon Pyro para expor o Manager como um serviço
+    # inicia o daemon pyro para expor o manager como um serviço
     daemon = Pyro5.server.Daemon()
     uri = daemon.register(manager, objectId="DataNodesManager")
     ns = Pyro5.api.locate_ns()  # Localiza o Name Server Pyro
@@ -142,5 +161,5 @@ if __name__ == "__main__":
     print(f"   Serviço RMI disponível em: {uri}")
     print("="*50)
     
-    # 4. Iniciar o loop do Pyro
+    # loop principal
     daemon.requestLoop()

@@ -13,8 +13,10 @@ from concurrent.futures import ThreadPoolExecutor
 # CLASSE DE SESSÃO PARA UPLOAD
 # ==============================================================================
 
+# --- Constantes de Configuração --
 MAX_RETRIES = 5
 RETRY_DELAY = 2
+# ---------------------------------
 
 @Pyro5.api.expose
 class UploadSession:
@@ -25,7 +27,6 @@ class UploadSession:
     def __init__(self, daemon, metadata_repo, datanode_registry, dfs_path, replica_count=2):
         self._daemon = daemon
         self._metadata_repo = metadata_repo
-        # CORREÇÃO: Recebe o registro de nós, não um cliente
         self._datanode_registry = datanode_registry
         self._dfs_path = dfs_path
         self._replica_count = replica_count
@@ -62,7 +63,6 @@ class UploadSession:
         current_size = endpoint_info['current_size']
         nodes = endpoint_info.get('nodes', [])
         
-        # CORREÇÃO: Lógica de seleção de nós, sem simulação.
         active_nodes = self._datanode_registry.get_available_nodes()
         if len(active_nodes) < self._replica_count:
             raise IOError(f"Nós de dados ativos ({len(active_nodes)}) insuficientes para o fator de replicação ({self._replica_count}).")
@@ -122,7 +122,7 @@ class UploadSession:
             endpoint_info['current_size'] = 0
             endpoint_info['nodes'] = []
             
-            # Fecha os arquivos nos workers
+            # Fecha os arquivos nos datanodes
             for uri in nodes:
                 with Pyro5.api.Proxy(uri) as proxy:
                     proxy.close_block(block_id)
@@ -163,8 +163,6 @@ class UploadSession:
             self.block_metadata.append(block_info)
 
         
-
-
     def commit(self, total_size):
         if not self.is_active:
             return {"status": "error", "message": "Sessão já finalizada."}
@@ -242,7 +240,7 @@ class DownloadSession:
                     future = executor.submit(self._read_block_from_node, chosen_replica, block['block_id'])
                     future_reads[future] = block
                 else:
-                    # Se nenhuma réplica está disponível, já coloca a exceção no buffer para o cliente saber
+                    # se nenhuma réplica estiver disponível, comocamos uma exceção no buffer para enviar ao cliente
                     self.buffer.put(Exception(f"Nenhuma réplica ativa disponível para o bloco {block['block_id']}"))
 
 
@@ -251,7 +249,7 @@ class DownloadSession:
                     block_data = future.result()
                     self.buffer.put(block_data)
                 except Exception as e:
-                    self.buffer.put(e) # Coloca a exceção no buffer para o cliente saber
+                    self.buffer.put(e) # insere a exceção no buffer
                     return
         self.buffer.put(None)
 
@@ -276,17 +274,16 @@ class CopyService:
     def __init__(self, daemon, metadata_repo, datanode_registry):
         self._daemon = daemon
         self._metadata_repo = metadata_repo
-        # CORREÇÃO: Armazena o registro de nós para passar para as sessões
         self._datanode_registry = datanode_registry
         print("CopyService (Fábrica de Sessões) inicializado.")
 
     def initiate_upload(self, dfs_path, client_name):
-        # Juntando os nomes para criar um caminho único com join
+        # juntando os nomes para criar um caminho único
         dfs_path = "".join([client_name, dfs_path]) if client_name else dfs_path
 
         print(f"Iniciando uma nova sessão de upload para: {dfs_path}")
 
-        # CORREÇÃO: Passa o datanode_registry para a sessão
+        # inicializa a sessao de upload e os metadados do bloco
         session = UploadSession(self._daemon, self._metadata_repo, self._datanode_registry, dfs_path)
         session_uri = self._daemon.register(session)
         endpoint = {
@@ -299,7 +296,6 @@ class CopyService:
         return {"session_uri": str(session_uri), "endpoint": endpoint}
     
     def initiate_download(self, dfs_path, client_name):
-        dfs_path = "".join([client_name, dfs_path]) if client_name else dfs_path
 
         print(f"[CopyService] Iniciando sessão de download para: {dfs_path}")
         entry_info = self._metadata_repo.get_entry(dfs_path)
@@ -310,7 +306,6 @@ class CopyService:
         if not block_list:
             return {"session_uri": None, "message": "Arquivo vazio."}
 
-        # CORREÇÃO: Não precisa mais passar o datanode_client
         session = DownloadSession(self._daemon, block_list, self._datanode_registry)
         session_uri = self._daemon.register(session)
         return {"session_uri": str(session_uri)}

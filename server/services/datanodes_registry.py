@@ -5,7 +5,7 @@ import threading
 class DataNodeRegistry:
     """
     Componente thread-safe para manter uma lista atualizada de DataNodes ativos.
-    Esta classe será instanciada no backend_server para manter sua visão do cluster.
+    Esta classe será instanciada no server para manter sua visão do cluster de datanodes.
     """
     def __init__(self):
         self._active_nodes = set()
@@ -27,13 +27,12 @@ class DataNodeRegistry:
     def remove_node(self, node_uri: str):
         """Remove um nó da lista de ativos."""
         with self._lock:
-            self._active_nodes.discard(node_uri)  # discard não levanta erro se o item não existir
+            self._active_nodes.discard(node_uri) 
         print(f"[DataNodeRegistry] Nó removido: {node_uri}. Nós ativos: {len(self._active_nodes)}")
         
     def get_available_nodes(self) -> list:
-        """Retorna uma cópia da lista de nós ativos para uso seguro."""
+        """Retorna uma cópia da lista de nós ativos."""
         with self._lock:
-            # Em um sistema real, a seleção poderia ser mais inteligente (baseada em carga, etc.)
             return list(self._active_nodes)
 
     def get_all(self) -> set:
