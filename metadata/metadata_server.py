@@ -1,10 +1,10 @@
-import threading
-import json
-import os
-import time
-import Pyro5.api
-import Pyro5.server
 from kafka import KafkaProducer
+import Pyro5.server
+import threading
+import Pyro5.api
+import json
+import time
+import os
 
 # --- Constantes de Configuração ------------------
 STATE_FILE = "metadata_storage.json"

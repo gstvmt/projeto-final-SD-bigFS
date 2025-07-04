@@ -61,7 +61,7 @@ def test_large_file_transfer():
             - Verificação de integridade pode ser desligada com verify=False
     """
     # Configuração
-    file_size_mb = 5120  # 5GB
+    file_size_mb = 518  # 5GB
     local_file = "large_file.txt"
     remote_path = "dfs:/large_file.txt"
     

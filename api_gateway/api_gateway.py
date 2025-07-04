@@ -1,10 +1,10 @@
+from kafka import KafkaConsumer
+import Pyro5.server
+import Pyro5.api
 import threading
 import time
 import json
 import os
-import Pyro5.api
-import Pyro5.server
-from kafka import KafkaConsumer
 
 # --- Constantes de Configuração ---
 KAFKA_TOPIC = "server_heartbeats"

@@ -1,30 +1,52 @@
 # services/copy_service.py
 
-import time
-import base64
-import Pyro5.api
-import threading
-import uuid
-import queue
-import random
 from concurrent.futures import ThreadPoolExecutor
-
-# ==============================================================================
-# CLASSE DE SESSÃO PARA UPLOAD
-# ==============================================================================
+import threading
+import Pyro5.api
+import base64
+import random
+import queue
+import time
+import uuid
 
 # --- Constantes de Configuração --
 MAX_RETRIES = 5
 RETRY_DELAY = 2
-# ---------------------------------
 
+# CLASSE DE SESSÃO PARA UPLOAD
 @Pyro5.api.expose
 class UploadSession:
     """
-    Gerencia um único upload. Obtém a lista de DataNodes ativos do registro
-    e se comunica diretamente com eles.
+        Gerencia um único upload. Obtém a lista de DataNodes ativos do registro
+        e se comunica diretamente com eles.
     """
     def __init__(self, daemon, metadata_repo, datanode_registry, dfs_path, replica_count=2):
+        """
+            Inicializa uma nova sessão de upload.
+
+            -------------------------------------------------------
+            Parâmetros:
+                daemon : Pyro5.server.Daemon
+                    Instância do daemon Pyro para comunicação RMI
+                metadata_repo : Objeto MetadataRepository
+                datanode_registry : DObjeto ataNodeRegistry
+                dfs_path : str
+                    Caminho destino no sistema de arquivos distribuído
+                replica_count : int, opcional (padrão=2)
+                    Fator de replicação para cada bloco
+
+            -------------------------------------------------------
+            Configurações:
+                - block_size: 32MB (tamanho fixo dos blocos)
+                - max_workers: 10 (threads para upload paralelo)
+
+            -------------------------------------------------------
+            Inicialização:
+                1. Gera ID único para a sessão
+                2. Configura parâmetros de replicação
+                3. Prepara estruturas para armazenar metadados
+                4. Inicializa thread pool para operações paralelas
+        """
         self._daemon = daemon
         self._metadata_repo = metadata_repo
         self._datanode_registry = datanode_registry
@@ -39,7 +61,30 @@ class UploadSession:
         print(f"Sessão de Upload {self.session_id} criada para '{dfs_path}'.")
 
     def _write_block_to_node(self, uri, block_id, data):
-        """Função auxiliar que faz a chamada RMI real para um DataNode."""
+        """
+            Executa a escrita de um bloco em um DataNode específico via RMI.
+
+            -------------------------------------------------------
+            Funcionamento geral:
+                Estabelece conexão com o DataNode através de Pyro5 e executa
+                a operação de escrita remota do bloco.
+
+            -------------------------------------------------------
+            Parâmetros:
+                uri : str
+                    Endereço URI do DataNode alvo
+                block_id : str
+                    Identificador único do bloco
+                data : bytes
+                    Dados binários a serem escritos
+
+            -------------------------------------------------------
+            Retorno:
+                bool
+                    True se a escrita foi bem-sucedida, False caso contrário
+
+        """
+        
         try:
             with Pyro5.api.Proxy(uri) as proxy:
                 return proxy.write_block(block_id, data)
@@ -48,6 +93,34 @@ class UploadSession:
             return False
 
     def write_chunk(self, chunk_data, endpoint_info):
+        """
+            Processa um chunk de dados e o escreve nos DataNodes com replicação.
+
+            -------------------------------------------------------
+            Funcionamento geral:
+                1. Decodifica os dados se estiverem em base64
+                2. Seleciona nós para replicação
+                3. Executa escrita distribuída com tolerância a falhas
+                4. Atualiza metadados do bloco quando completo
+
+            -------------------------------------------------------
+            Parâmetros:
+                chunk_data : dict ou bytes
+                    Dados a serem escritos (pode ser dict com encoding base64)
+                endpoint_info : dict
+                    Estado atual do upload contendo:
+                    - file_path: caminho do arquivo
+                    - next_block: número do próximo bloco
+                    - current_size: tamanho acumulado no bloco atual
+                    - nodes: lista de nós usados para replicação
+
+            -------------------------------------------------------
+            Retorno:
+                dict
+                    endpoint_info atualizado após processamento do chunk
+
+        """
+        
         if not self.is_active:
             raise RuntimeError("Sessão de upload não está mais ativa.")
 
@@ -139,7 +212,31 @@ class UploadSession:
 
     def close(self, endpoint_info):
         """
-        Método chamado pelo cliente para fechar os blocos restantes.
+            Finaliza o processamento dos blocos remanescentes de um upload.
+
+            -------------------------------------------------------
+            Funcionamento geral:
+                Processa qualquer dado remanescente no buffer de upload que não preencheu
+                completamente um bloco, fechando os arquivos abertos nos DataNodes e
+                registrando os metadados finais.
+
+            -------------------------------------------------------
+            Parâmetros:
+                endpoint_info : dict
+                    Estado atual do upload contendo:
+                    - file_path: caminho lógico do arquivo
+                    - next_block: número do próximo bloco
+                    - current_size: tamanho acumulado no bloco atual
+                    - nodes: lista de nós usados para replicação
+
+            -------------------------------------------------------
+            Comportamento:
+                - Se houver dados não commitados (current_size > 0):
+                    1. Gera o block_id final
+                    2. Fecha os arquivos nos DataNodes
+                    3. Registra os metadados do bloco final
+                - Não há retorno explícito (operações são side-effects)
+
         """
 
         p_string = endpoint_info['file_path']
@@ -164,6 +261,45 @@ class UploadSession:
 
         
     def commit(self, total_size):
+        """
+            Finaliza a sessão de upload registrando os metadados no sistema.
+
+            -------------------------------------------------------
+            Funcionamento geral:
+                1. Valida se a sessão ainda está ativa
+                2. Cria a estrutura de metadados do arquivo
+                3. Persiste os metadados no repositório
+                4. Executa cleanup da sessão
+
+            -------------------------------------------------------
+            Parâmetros:
+                total_size : int
+                    Tamanho total do arquivo em bytes
+
+            -------------------------------------------------------
+            Retorno:
+                dict
+                    Resultado da operação com formato:
+                    {
+                        "status": "success"|"error",
+                        "message": string descritiva
+                    }
+
+            -------------------------------------------------------
+            Estrutura de metadados:
+                {
+                    "type": "file",
+                    "size": total_size,
+                    "blocks": [
+                        {
+                            "block_order": int,
+                            "block_id": string,
+                            "replicas": [lista_de_uris]
+                        },
+                        ...
+                    ]
+                }
+        """
         if not self.is_active:
             return {"status": "error", "message": "Sessão já finalizada."}
         
@@ -195,12 +331,32 @@ class UploadSession:
         self._daemon.unregister(self)
         print(f"Sessão {self.session_id} limpa e desregistrada.")
 
-# ==============================================================================
+
 # CLASSE DE SESSÃO PARA DOWNLOAD
-# ==============================================================================
 @Pyro5.api.expose
 class DownloadSession:
     def __init__(self, daemon, block_list, datanode_registry):
+        """
+            Inicializa uma nova sessão de download.
+
+            -------------------------------------------------------
+            Parâmetros:
+                daemon : Pyro5.server.Daemon
+                    Instância do daemon Pyro para chamadas RMI
+
+                block_list : list
+                    Lista de blocos do arquivo (com metadados)
+
+                datanode_registry : DataNodeRegistry
+                    Registro de nós de dados disponíveis
+
+            -------------------------------------------------------
+            Comportamento:
+                1. Ordena blocos por ordem numérica
+                2. Inicia thread de pré-busca (prefetch)
+                3. Configura buffer com capacidade para 10 blocos
+        """
+
         self._daemon = daemon
         self._block_list = sorted(block_list, key=lambda b: b['block_order'])
         self._datanode_registry = datanode_registry
@@ -214,7 +370,21 @@ class DownloadSession:
         print(f"Sessão de Download {self.session_id} criada.")
 
     def _read_block_from_node(self, uri, block_id):
-        """Função auxiliar que faz a chamada RMI real para um DataNode."""
+        """
+            Lê um bloco de dados de um DataNode específico.
+
+            -------------------------------------------------------
+            Parâmetros:
+                uri : str
+                    Endereço do DataNode
+                block_id : str
+                    Identificador do bloco
+
+            -------------------------------------------------------
+            Retorno:
+                bytes
+                    Conteúdo do bloco ou exceção em caso de falha
+        """
         try:
             with Pyro5.api.Proxy(uri) as proxy:
                 return proxy.read_block(block_id)
@@ -224,13 +394,42 @@ class DownloadSession:
             raise
 
     def _choose_active_replica(self, replicas, active_nodes):
+        """
+            Seleciona uma réplica ativa para leitura.
+
+            -------------------------------------------------------
+            Parâmetros:
+                replicas : list
+                    Lista de URIs de réplicas disponíveis
+                active_nodes : list
+                    Lista de nós ativos no registry
+
+            -------------------------------------------------------
+            Retorno:
+                str ou None
+                    URI da réplica selecionada ou None se nenhuma disponível
+        """
         active_replicas = [replica for replica in replicas if replica in active_nodes]
         if not active_replicas:
             return None  # Nenhuma réplica ativa
         return random.choice(active_replicas)
     
     def _prefetch_blocks(self):
-        
+        """
+            Executa pré-busca paralela dos blocos do arquivo.
+
+            -------------------------------------------------------
+            Funcionamento:
+                1. Cria pool de threads para leitura paralela
+                2. Para cada bloco:
+                    - Seleciona réplica ativa
+                    - Submete tarefa de leitura
+                3. Coloca resultados no buffer:
+                    - Dados dos blocos
+                    - Exceções em caso de falha
+                    - None ao finalizar
+
+        """
         with ThreadPoolExecutor(max_workers=5) as executor:
             future_reads = {}
             for block in self._block_list:
@@ -266,20 +465,56 @@ class DownloadSession:
             self._daemon.unregister(self)
             print(f"Sessão de Download {self.session_id} limpa.")
 
-# ==============================================================================
-# CLASSE DE SERVIÇO PRINCIPAL (A FÁBRICA DE SESSÕES)
-# ==============================================================================
+# CLASSE DE SERVIÇO PRINCIPAL
 @Pyro5.api.expose
 class CopyService:
     def __init__(self, daemon, metadata_repo, datanode_registry):
+        """
+            Inicializa o serviço de cópia.
+
+            -------------------------------------------------------
+            Parâmetros:
+                daemon : Pyro5.server.Daemon
+                    Instância do daemon Pyro para registro de objetos
+                metadata_repo : Objeto MetadataRepository
+                datanode_registry : Objeto DataNodeRegistry
+
+        """
         self._daemon = daemon
         self._metadata_repo = metadata_repo
         self._datanode_registry = datanode_registry
-        print("CopyService (Fábrica de Sessões) inicializado.")
+
+        print("CopyService inicializado.")
 
     def initiate_upload(self, dfs_path, client_name):
+        """
+            Inicia uma nova sessão de upload.
+
+            -------------------------------------------------------
+            Parâmetros:
+                dfs_path : str
+                    Caminho desejado no sistema de arquivos distribuído
+                client_name : str
+                    Identificador do cliente (para namespacing)
+
+            -------------------------------------------------------
+            Retorno:
+                dict
+                    Contendo:
+                    - session_uri: URI da sessão criada
+                    - endpoint: Informações iniciais para upload
+
+            -------------------------------------------------------
+            Comportamento:
+                1. Cria caminho único combinando client_name e dfs_path
+                2. Instancia nova UploadSession
+                3. Registra sessão no daemon Pyro
+                4. Retorna URI e endpoint inicial
+        """
+
         # juntando os nomes para criar um caminho único
-        dfs_path = "".join([client_name, dfs_path]) if client_name else dfs_path
+        clean_path = dfs_path.removeprefix("dfs:")
+        dfs_path = "".join([client_name, clean_path]) if client_name else clean_path
 
         print(f"Iniciando uma nova sessão de upload para: {dfs_path}")
 
@@ -296,6 +531,33 @@ class CopyService:
         return {"session_uri": str(session_uri), "endpoint": endpoint}
     
     def initiate_download(self, dfs_path, client_name):
+        """
+            Inicia uma nova sessão de download.
+
+            -------------------------------------------------------
+            Parâmetros:
+                dfs_path : str
+                    Caminho do arquivo no sistema distribuído
+                client_name : str
+                    Identificador do cliente (para logging)
+
+            -------------------------------------------------------
+            Retorno:
+                dict
+                    Contendo:
+                    - session_uri: URI da sessão criada
+                    - message: Mensagem adicional
+
+            -------------------------------------------------------
+            Comportamento:
+                1. Verifica existência do arquivo nos metadados
+                2. Cria DownloadSession se arquivo válido
+                3. Registra sessão no daemon Pyro
+                4. Retorna URI da sessão
+        """
+
+        clean_path = dfs_path.removeprefix("dfs:")
+        dfs_path = "".join([client_name, clean_path]) if client_name else clean_path
 
         print(f"[CopyService] Iniciando sessão de download para: {dfs_path}")
         entry_info = self._metadata_repo.get_entry(dfs_path)

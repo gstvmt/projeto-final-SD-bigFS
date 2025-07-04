@@ -1,12 +1,12 @@
-import os
+from kafka import KafkaProducer
+import threading
 import Pyro5.api
 import socket
-import time
-import threading
-import json
 import psutil
 import base64
-from kafka import KafkaProducer
+import time
+import json
+import os
 
 # --- Constantes de Configuração ---
 HEARTBEAT_INTERVAL_SECONDS = 0.5
@@ -18,6 +18,23 @@ KAFKA_SERVERS = ['localhost:9092']
 class DataNodeService:
     
     def __init__(self, node_id, storage_path):
+        """
+            Inicializa o datanode.
+
+            -------------------------------------------------------
+            Funcionamento geral:
+                Configura o ambiente de armazenamento local para os blocos de dados,
+                criando o diretório especificado se ele não existir.
+
+            -------------------------------------------------------
+            Parâmetros:
+                node_id : str
+                    Identificador único para este nó de armazenamento.
+
+                storage_path : str
+                    Caminho local onde os blocos serão armazenados.
+
+        """
         self._node_id = node_id
         self._storage_path = storage_path
         self.opened_files = {}
@@ -29,10 +46,27 @@ class DataNodeService:
         else:
             print(f"[{self._node_id}] Utilizando diretório de armazenamento: {self._storage_path}")
 
-# ========================================= Metodos ================================================
 
     def _get_block_filepath(self, block_id: str) -> str:
+        """
+            Obtém o caminho completo para um bloco de dados.
 
+            -------------------------------------------------------
+            Funcionamento geral:
+                Constrói o caminho completo para o arquivo que armazena o bloco,
+                criando a estrutura de diretórios necessária se ela não existir.
+
+            -------------------------------------------------------
+            Parâmetros:
+                block_id : str
+                    Identificador único do bloco de dados.
+
+            -------------------------------------------------------
+            Retorno:
+                str
+                    Caminho completo do arquivo que armazena o bloco.
+
+        """
         # Junta o storage_path com o block_id (permitindo subdiretórios dentro do block_id)
         full_path = os.path.join(self._storage_path, block_id)
         
@@ -45,6 +79,33 @@ class DataNodeService:
         return full_path
 
     def write_block(self, block_id, data):
+        """
+            Escreve em um bloco.
+
+            -------------------------------------------------------
+            Funcionamento geral:
+                Esta função recebe dados e grava no sistema de arquivos local. O bloco é 
+                armazenado em um arquivo específico identificado pelo `block_id`.
+
+                Se o arquivo correspondente ao `block_id` não estiver aberto, ele será criado/aberto
+                em modo binário. Se o bloco de dados estiver vazio, o arquivo será fechado.
+
+            -------------------------------------------------------
+            Parâmetros:
+                block_id : str
+                    Identificador único do bloco de dados que será gravado.
+
+                data : dict ou bytes
+                    Dados a serem escritos no arquivo. Pode ser:
+                        - Um dicionário contendo {"data": "base64_encoded_data"}
+                        - Dados binários diretamente
+
+            -------------------------------------------------------
+            Retorno:
+                bool
+                    Retorna `True` se a operação for bem-sucedida.
+
+        """
 
         data = base64.b64decode(data.get("data")) if isinstance(data, dict) else data
 
@@ -68,7 +129,26 @@ class DataNodeService:
 
 
     def close_block(self, block_id):
-        
+        """
+            Fecha um bloco de dados aberto anteriormente e o remove da lista de arquivos abertos.
+
+            -------------------------------------------------------
+            Funcionamento geral:
+                Esta função finaliza o acesso a um bloco de dados que estava sendo manipulado,
+                fechando o arquivo correspondente e liberando os recursos do sistema.
+                O bloco permanece armazenado no sistema de arquivos local após o fechamento.
+
+            --------------------------------------------
+            Parâmetros:
+                block_id : str
+                    Identificador único do bloco de dados que será fechado.
+
+            -------------------------------------------------------
+            Retorno:
+                None
+                    A função não retorna nenhum valor explicitamente.
+
+        """
         try:
             filepath = self._get_block_filepath(block_id)
 
@@ -83,6 +163,27 @@ class DataNodeService:
             raise e
         
     def read_block(self, block_id):
+        """
+            Lê o conteúdo de um bloco de dados do armazenamento local.
+
+            -------------------------------------------------------
+            Funcionamento geral:
+                Esta função recupera o conteúdo completo de um bloco de dados armazenado no sistema
+                de arquivos local, identificado pelo `block_id`. O arquivo é aberto em modo binário
+                e seu conteúdo é lido integralmente.
+
+            -------------------------------------------------------
+            Parâmetros:
+                block_id : str
+                    Identificador único do bloco de dados que será lido.
+
+            -------------------------------------------------------
+            Retorno:
+                bytes
+                    Conteúdo binário do bloco de dados lido.
+
+        """
+
         filepath = self._get_block_filepath(block_id)
         print(f"[{self._node_id}] Lendo bloco '{block_id}' do disco.")
         try:
@@ -108,8 +209,32 @@ class DataNodeService:
 # ========================================= Heartbeat Producer Thread ================================================
 
 def heartbeat_producer(datanode_uri, node_id):
+    """
+        Envia métricas do nó para o tópico Kafka periodicamente.
 
-    """Envia heartbeats para o tópico Kafka em uma thread de background."""
+        -------------------------------------------------------
+        Funcionamento geral:
+            Executa em loop infinito, coletando métricas do sistema (uso de memória,
+            espaço em disco e taxas de I/O) e enviando para um tópico Kafka.
+
+        -------------------------------------------------------
+        Parâmetros:
+            datanode_uri : str
+                Endereço URI do datanode que está enviando os heartbeats.
+
+            node_id : str
+                Identificador único do nó que está enviando os heartbeats.
+
+        -------------------------------------------------------
+        Comportamento:
+            - Coleta métricas a cada HEARTBEAT_INTERVAL_SECONDS segundos
+            - Calcula taxas de leitura/escrita do disco entre intervalos
+            - Envia payload contendo:
+                * Endereço do nó
+                * Uso de memória (percentual)
+                * Espaço livre em disco (GB)
+                * Taxas de leitura/escrita do disco (bytes/segundo)
+    """
 
     producer = KafkaProducer(
     bootstrap_servers=KAFKA_SERVERS,
@@ -153,7 +278,6 @@ def heartbeat_producer(datanode_uri, node_id):
         producer.send(KAFKA_TOPIC, payload)
         time.sleep(HEARTBEAT_INTERVAL_SECONDS) 
 
-# ========================================= Main ================================================
 
 if __name__ == "__main__":
 

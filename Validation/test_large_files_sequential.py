@@ -1,10 +1,9 @@
 # Cenário 5
-import time
-from utils import create_test_files, drop_caches
-import os
-import sys
-import Pyro5.api
 from monitor_resources import KafkaResourceMonitor
+from utils import create_test_files, drop_caches
+import Pyro5.api
+import sys
+import os
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../client')))
 from client import FileSystemClient

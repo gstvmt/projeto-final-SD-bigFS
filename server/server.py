@@ -1,23 +1,23 @@
+from kafka import KafkaConsumer, KafkaProducer
+import Pyro5.server
 import threading
+import Pyro5.api
 import time
 import json
-import Pyro5.api
-import Pyro5.server
-from kafka import KafkaConsumer, KafkaProducer
 
 # Importando os componentes e serviços
-from shared.metadata_repo import MetadataRepository
 from services.datanodes_registry import DataNodeRegistry
-from services.list_service import ListService
+from shared.metadata_repo import MetadataRepository
 from services.remove_service import RemoveService
+from services.list_service import ListService
 from services.copy_service import CopyService 
 
 # --- Configuração ---
-HEARTBEAT_INTERVAL_SECONDS = 5
-KAFKA_HEARTBEAT_TOPIC = "server_heartbeats" # Heartbeat deste próprio servidor
 KAFKA_UPDATE_TOPIC = "datanode_cluster_updates" # Tópico para ouvir o Manager
+KAFKA_HEARTBEAT_TOPIC = "server_heartbeats" # Heartbeat deste próprio servidor
 KAFKA_INVALIDATION_TOPIC = "metadata_invalidation_events"
 KAFKA_SERVERS = ['localhost:9092']
+HEARTBEAT_INTERVAL_SECONDS = 5
 
 
 # --- Threads de Background ---
@@ -25,7 +25,35 @@ KAFKA_SERVERS = ['localhost:9092']
 
 def server_heartbeat_producer(daemon_uri, service_names, kafka_producer):
 
-    """Envia o heartbeat deste servidor de lógica para o API Gateway."""
+    """
+        Envia heartbeat periódicos do servidor.
+
+        -------------------------------------------------------
+        Funcionamento geral:
+            Envia mensagens regulares de heartbeat para informar ao API Gateway
+            que este servidor está ativo e quais serviços ele está hospedando.
+
+        -------------------------------------------------------
+        Parâmetros:
+            daemon_uri : str
+                Endereço URI deste servidor que será reportado ao API Gateway.
+
+            service_names : list
+                Lista de nomes de serviços hospedados por este servidor.
+
+            kafka_producer : KafkaProducer
+                Instância configurada do produtor Kafka para envio das mensagens.
+
+        -------------------------------------------------------
+        Comportamento:
+            - Envia heartbeats
+            - Cada mensagem contém:
+                * Localização do daemon
+                * Lista de serviços hospedados
+                * Timestamp do envio
+            - Executa em loop infinito até término do processo
+
+    """
 
     payload = {"daemon_location": str(daemon_uri), "hostedServices": service_names}
     print(f"Thread de Heartbeat do Servidor iniciada para {daemon_uri}.")
@@ -38,7 +66,28 @@ def server_heartbeat_producer(daemon_uri, service_names, kafka_producer):
 
 def datanode_update_consumer(registry: DataNodeRegistry):
 
-    """Consome o tópico de atualizações do cluster de DataNodes."""
+    """
+        Consome mensagens de atualização do estado dos DataNodes no cluster.
+
+        -------------------------------------------------------
+        Funcionamento geral:
+            Fica em loop consumindo mensagens do tópico Kafka designado para atualizações
+            de estado dos DataNodes, atualizando o registro conforme as notificações recebidas.
+
+        -------------------------------------------------------
+        Parâmetros:
+            registry : DataNodeRegistry
+                Instância do registro de DataNodes que será atualizada conforme as mensagens recebidas.
+
+        -------------------------------------------------------
+        Comportamento:
+            - Processa mensagens dos tipos:
+                * NODE_UP: Adiciona novo DataNode ao registry
+                * NODE_DOWN: Remove DataNode do registry
+            - Mensagens malformadas são registradas mas não interrompem o consumo
+            - Erros fatais encerram o consumidor
+
+    """
 
     print("Thread consumidora de atualizações de DataNode iniciada.")
     try:
@@ -66,8 +115,25 @@ def datanode_update_consumer(registry: DataNodeRegistry):
 
 def cache_invalidation_consumer(repo: MetadataRepository):
     """
-    Consome o tópico de invalidação de metadados e chama o callback
-    no MetadataRepository para limpar o cache local.
+        Consome mensagens de invalidação de cache de metadados.
+
+        -------------------------------------------------------
+        Funcionamento geral:
+            Fica em loop consumindo mensagens do tópico Kafka designado para invalidações
+            de cache, acionando a limpeza do cache local.
+
+        -------------------------------------------------------
+        Parâmetros:
+            repo : MetadataRepository
+                Instância do repositório de metadados que terá seu cache invalidado.
+
+        -------------------------------------------------------
+        Comportamento:
+            - Processa mensagens contendo caminhos a serem invalidados
+            - Chama o método invalidate_cache do repositório para cada caminho recebido
+            - Mensagens malformadas são registradas mas não interrompem o consumo
+            - Erros fatais encerram o consumidor
+
     """
     print("Thread consumidora de invalidação de cache iniciada.")
     try:
@@ -93,8 +159,18 @@ def cache_invalidation_consumer(repo: MetadataRepository):
 # ---------------------------------------------------------------------
 
 if __name__ == "__main__":
+    """
+        Função principal.
 
-    # REFERENCIAS REMOTAS ESSENCIAIS
+        -------------------------------------------------------
+        Funcionamento geral:
+            1. Localiza serviços no Name Server Pyro
+            2. Inicializa componentes compartilhados
+            3. Realiza bootstrap do estado inicial
+            4. Configura e registra serviços Pyro
+            5. Inicia threads de background
+            6. Inicia o loop principal do servidor
+    """
 
     ns = Pyro5.api.locate_ns()  # Localiza o Name Server Pyro
     try:
@@ -110,9 +186,6 @@ if __name__ == "__main__":
     except (AssertionError, EOFError):
         print("URI do MetadataService é necessária e deve ser válida. Encerrando.")
         exit(1)
-
-
-    # COMPONENTES COMPARTILHADOS
 
     print("Inicializando componentes compartilhados...")
     datanode_registry = DataNodeRegistry()
@@ -130,10 +203,10 @@ if __name__ == "__main__":
         print(f"ERRO CRÍTICO: Falha ao realizar bootstrap: {e}. O servidor pode operar sem a lista completa de DataNodes.")
 
    
-    # INSTANCIAR O DAEMON PYRO  
+    # INSTANCIANDO DAEMON PYRO  
     daemon = Pyro5.server.Daemon()
 
-    # INSTANCIAR E REGISTRAR OS SERVIÇOS
+    # INSTANCIANDO E REGISTRANDO OS SERVIÇOS
     print("Instanciando e registrando serviços...")
     list_svc = ListService(metadata_repo)
     remove_svc = RemoveService(metadata_repo) # Este serviço também precisaria do DataNodeClient

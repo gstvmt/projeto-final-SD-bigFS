@@ -1,11 +1,11 @@
 # datanodes_manager.py
 
+from kafka import KafkaConsumer, KafkaProducer
+import Pyro5.server
 import threading
+import Pyro5.api
 import time
 import json
-import Pyro5.api
-import Pyro5.server
-from kafka import KafkaConsumer, KafkaProducer
 
 # --- Constantes de Configuração ---
 HEARTBEAT_TOPIC = "datanode_heartbeats"
@@ -54,7 +54,7 @@ class DataNodesManager:
         Processa um heartbeat de um DataNode.
         """
         try:
-            print("to funcionando XD")
+            print("ping")
             data = json.loads(kafka_message)
             node_uri = data["address"]
             memory_used_percent = data.get("memory_used_percent", 0)

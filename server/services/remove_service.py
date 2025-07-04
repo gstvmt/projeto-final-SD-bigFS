@@ -1,5 +1,5 @@
-import Pyro5.api
 from concurrent.futures import ThreadPoolExecutor
+import Pyro5.api
 
 @Pyro5.api.expose
 class RemoveService:
@@ -24,11 +24,12 @@ class RemoveService:
             print(f"ERRO: Falha na comunicação com {datanode_uri} ao deletar bloco {block_id}: {e}")
             return False
 
-    def rm(self, path):
+    def rm(self, path, client_name):
         """
         Remove um arquivo do sistema. A lógica de comunicação com os DataNodes
         está agora diretamente dentro deste método.
         """
+        path = "".join(["/", client_name, path]) if client_name else path
         print(f"[RemoveService] Iniciando remoção para: '{path}'")
 
         # Acessa a entrada do arquivo no servidor de metadados

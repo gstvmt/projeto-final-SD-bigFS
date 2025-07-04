@@ -1,7 +1,7 @@
 from kafka import KafkaConsumer
-import json
 import matplotlib.pyplot as plt
 import threading
+import json
 import time
 
 class KafkaResourceMonitor:

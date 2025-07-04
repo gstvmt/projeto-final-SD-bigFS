@@ -6,7 +6,7 @@ class ListService:
         self._metadata_repo = metadata_repo
         print("ListService inicializado.")
 
-    def ls(self, path, long_format=False):
+    def ls(self, path, client_name, long_format=False):
         """
         Simula o comando 'ls'.
         Parametros:
@@ -15,6 +15,9 @@ class ListService:
         Retorno:
             Uma lista de nomes de arquivos/diretórios ou uma lista de dicionários com detalhes.
         """
+        path = "".join(["/", client_name, path]) if client_name else path
+        path = path.rstrip("/")
+
         print(f"[ListService] Executando ls para o caminho: '{path}' (long_format={long_format})")
         dir_info = self._metadata_repo.get_entry(path)
 

@@ -1,8 +1,8 @@
 import Pyro5.api
-import shlex
-import os
-import time
 import base64
+import shlex
+import time
+import os
 
 class FileSystemClient:
     """
@@ -26,13 +26,13 @@ class FileSystemClient:
         """
         Abstrai a chamada para o serviço List.
         """
-        return self.gateway_proxy.forward_request("ListService", "ls", dfs_path, long_format=long_format)
+        return self.gateway_proxy.forward_request("ListService", "ls", dfs_path, self.client_id, long_format=long_format)
 
     def remove_file(self, dfs_path):
         """
         Abstrai a chamada para o serviço Remove.
         """
-        return self.gateway_proxy.forward_request("RemoveService", "rm", dfs_path)
+        return self.gateway_proxy.forward_request("RemoveService", "rm", dfs_path, self.client_id)
 
     def upload_file(self, local_path, dfs_path):
         """

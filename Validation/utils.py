@@ -1,8 +1,6 @@
-import os
-import hashlib
-import random
-import string
 import subprocess
+import hashlib
+import os
 
 def generate_random_file(path, size_kb):
     """Gera um arquivo binário com o caractere 'A' repetido, com tamanho especificado em KB."""
